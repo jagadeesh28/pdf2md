@@ -81,7 +81,7 @@ Represent mathematics using LaTeX delimiters supported by Obsidian: use $...$ fo
         };
 
         let client = reqwest::Client::new();
-        let endpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent";
+        let endpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemma-4-26b-a4b-it:generateContent";
         // "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent";
         //"https://generativelanguage.googleapis.com/v1beta/models/gemma-4-26b-a4b-it:generateContent";
 
