@@ -1,5 +1,5 @@
 target/
 images/
-FCH*.md
+*.md
 *.pdf
 Cargo.lock

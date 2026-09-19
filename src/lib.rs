@@ -25,18 +25,12 @@ pub fn process_pdf(
 ) -> Result<()> {
     validate_page_range(begin_page, end_page)?;
 
-    let extracted = match extract_pdf_text(input_path, begin_page, end_page) {
-        Ok(result) => result,
-        Err(err) => {
-            eprintln!("Direct extraction failed: {err}. Trying OCR fallback.");
-            let image_output_dir = output_path
-                .parent()
-                .unwrap_or_else(|| Path::new("."))
-                .join("images");
-            fall_back_to_ocr(input_path, &image_output_dir, begin_page, end_page)
-                .with_context(|| format!("OCR fallback failed for {}", input_path.display()))?
-        }
-    };
+    let image_output_dir = output_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("images");
+    let extracted = fall_back_to_ocr(input_path, &image_output_dir, begin_page, end_page)
+        .with_context(|| format!("Gemini OCR failed for {}", input_path.display()))?;
 
     let markdown = render_markdown(&extracted);
     let output_dir = output_path
@@ -114,7 +108,7 @@ pub fn fall_back_to_ocr(
     
     let api_key = std::env::var("GEMINI_API_KEY").map_err(|_| {
         anyhow::anyhow!(
-            "OCR fallback requires GEMINI_API_KEY. Set it before running the scanned-PDF path, e.g. on Windows: $env:GEMINI_API_KEY='your_api_key'"
+            "Gemini OCR requires GEMINI_API_KEY. Set it before converting a PDF, e.g. on Windows: $env:GEMINI_API_KEY='your_api_key'"
         )
     })?;
     
@@ -156,16 +150,8 @@ pub fn render_markdown(result: &PdfExtractionResult) -> String {
 
     if !result.text.trim().is_empty() {
         output.push_str("# Extracted PDF text\n\n");
-        for line in result.text.lines() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                output.push('\n');
-                continue;
-            }
-
-            output.push_str(trimmed);
-            output.push('\n');
-        }
+        output.push_str(result.text.trim());
+        output.push_str("\n\n");
     }
 
     if !result.images.is_empty() {
