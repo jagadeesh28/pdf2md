@@ -29,18 +29,34 @@ pub fn process_pdf(
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join("images");
-    let extracted = fall_back_to_ocr(input_path, &image_output_dir, begin_page, end_page)
-        .with_context(|| format!("Gemini OCR failed for {}", input_path.display()))?;
-
-    let markdown = render_markdown(&extracted);
     let output_dir = output_path
         .parent()
         .unwrap_or_else(|| Path::new("."));
 
     fs::create_dir_all(output_dir)
         .with_context(|| format!("failed to create output directory {}", output_dir.display()))?;
-    fs::write(output_path, markdown)
-        .with_context(|| format!("failed to write markdown output to {}", output_path.display()))?;
+
+    let mut extracted = PdfExtractionResult::default();
+    process_ocr_pages(
+        input_path,
+        &image_output_dir,
+        begin_page,
+        end_page,
+        |text, image| {
+            if !text.trim().is_empty() {
+                extracted.text.push_str(&text);
+                if !extracted.text.ends_with("\n\n") {
+                    extracted.text.push_str("\n\n");
+                }
+            }
+            extracted.images.push(image);
+
+            fs::write(output_path, render_markdown(&extracted)).with_context(|| {
+                format!("failed to write markdown output to {}", output_path.display())
+            })
+        },
+    )
+    .with_context(|| format!("Gemini OCR failed for {}", input_path.display()))?;
 
     println!("Converted {} to {}", input_path.display(), output_path.display());
     Ok(())
@@ -88,6 +104,35 @@ pub fn fall_back_to_ocr(
     begin_page: usize,
     end_page: usize,
 ) -> Result<PdfExtractionResult> {
+    let mut result = PdfExtractionResult::default();
+    process_ocr_pages(
+        input_path,
+        image_output_dir,
+        begin_page,
+        end_page,
+        |text, image| {
+            if !text.trim().is_empty() {
+                result.text.push_str(&text);
+                result.text.push_str("\n\n");
+            }
+            result.images.push(image);
+            Ok(())
+        },
+    )?;
+
+    Ok(result)
+}
+
+fn process_ocr_pages<F>(
+    input_path: &Path,
+    image_output_dir: &Path,
+    begin_page: usize,
+    end_page: usize,
+    mut on_page: F,
+) -> Result<()>
+where
+    F: FnMut(String, PathBuf) -> Result<()>,
+{
     validate_page_range(begin_page, end_page)?;
 
     let temp_dir = tempfile::tempdir().context("failed to create temporary OCR directory")?;
@@ -97,7 +142,7 @@ pub fn fall_back_to_ocr(
         begin_page,
         end_page,
     )
-        .with_context(|| format!("failed to rasterize PDF {} for OCR", input_path.display()))?;
+    .with_context(|| format!("failed to rasterize PDF {} for OCR", input_path.display()))?;
 
     fs::create_dir_all(image_output_dir).with_context(|| {
         format!(
@@ -105,21 +150,16 @@ pub fn fall_back_to_ocr(
             image_output_dir.display()
         )
     })?;
-    
+
     let api_key = std::env::var("GEMINI_API_KEY").map_err(|_| {
         anyhow::anyhow!(
             "Gemini OCR requires GEMINI_API_KEY. Set it before converting a PDF, e.g. on Windows: $env:GEMINI_API_KEY='your_api_key'"
         )
     })?;
-    
-    let mut text_parts = Vec::new();
-    let mut images = Vec::new();
+
     for image_path in page_images {
         let ocr_text = gemini::ocr_image_file(&api_key, &image_path)
             .with_context(|| format!("Gemini OCR failed for {}", image_path.display()))?;
-        if !ocr_text.trim().is_empty() {
-            text_parts.push(ocr_text);
-        }
         let file_name = image_path
             .file_name()
             .with_context(|| format!("OCR image path has no file name: {}", image_path.display()))?;
@@ -131,13 +171,10 @@ pub fn fall_back_to_ocr(
                 destination.display()
             )
         })?;
-        images.push(destination);
+        on_page(ocr_text, destination)?;
     }
-    
-    Ok(PdfExtractionResult {
-        text: text_parts.join("\n\n"),
-        images,
-    })
+
+    Ok(())
 }
 
 pub fn should_use_ocr_fallback(text: &str) -> bool {

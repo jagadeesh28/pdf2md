@@ -65,7 +65,7 @@ pub fn ocr_image_file(api_key: &str, image_path: &Path) -> Result<String> {
                     Part {
                         text: Some(r#"Transcribe all visible content from this PDF page into Obsidian-compatible Markdown.
 Preserve the document's headings, paragraphs, lists, tables, emphasis, links, and reading order(sometimes make have two or more columns). Do not add commentary, explanations, or Markdown code fences. If there is no text, return an empty string.
-Represent tables faithfully using Markdown syntax, including headers, rows, and columns.Represent images using Markdown syntax with the image data encoded in base64. For example, use ![alt text](data:image/png;base64,...) for images.
+Represent tables faithfully using Markdown syntax, including headers, rows, and columns.
 Represent mathematics using LaTeX delimiters supported by Obsidian: use $...$ for inline equations, formulas, and mathematical symbols, and $$...$$ on separate lines for displayed or complex equations. Use standard LaTeX commands inside math delimiters (for example, \frac{a}{b}, \sum, \alpha, and \mathbb{R}) rather than replacing mathematical notation with prose. Keep equations faithful to the page and do not invent missing content."#.to_string()),
                         inline_data: None,
                     },
