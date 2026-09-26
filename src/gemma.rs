@@ -63,10 +63,20 @@ pub fn ocr_image_file(api_key: &str, image_path: &Path) -> Result<String> {
             contents: vec![Content {
                 parts: vec![
                     Part {
-                        text: Some(r#"Transcribe all visible content from this PDF page into Obsidian-compatible Markdown.
-Preserve the document's headings, paragraphs, lists, tables, emphasis, links, and reading order(sometimes make have two or more columns). Do not add commentary, explanations, or Markdown code fences. If there is no text, return an empty string.
-Represent tables faithfully using Markdown syntax, including headers, rows, and columns.
-Represent mathematics using LaTeX delimiters supported by Obsidian: use $...$ for inline equations, formulas, and mathematical symbols, and $$...$$ on separate lines for displayed or complex equations. Use standard LaTeX commands inside math delimiters (for example, \frac{a}{b}, \sum, \alpha, and \mathbb{R}) rather than replacing mathematical notation with prose. Keep equations faithful to the page and do not invent missing content."#.to_string()),
+                        text: Some(r#"[SYSTEM: CRITICAL INSTRUCTION]
+You operate exclusively as a literal OCR transcription tool. Do not think out loud. Do not create "Transcription Plans", "Image Analysis", or "Detailed Transcriptions". 
+
+Your final answer must contain ONLY the raw markdown content inside the <transcription> tags below. Everything else must be empty.
+
+<instructions>
+1. Output the verbatim text exactly as it appears in the image.
+2. Preserve reading order, headings, lists, tables, and typography.
+3. Represent math using Obsidian LaTeX delimiters: ... for inline, \[...\] on new lines for block equations.
+4. ZERO CHATTER: Do not output markdown code blocks (```), do not say "Here is your transcription", and do not write an introduction or conclusion.
+</instructions>
+
+<transcription>
+"#.to_string()),
                         inline_data: None,
                     },
                     Part {
@@ -81,12 +91,8 @@ Represent mathematics using LaTeX delimiters supported by Obsidian: use $...$ fo
         };
 
         let client = reqwest::Client::new();
-        let endpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.7-flash:generateContent";
-        // "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent";
-        //"https://generativelanguage.googleapis.com/v1beta/models/gemma-4-26b-a4b-it:generateContent";
+        let endpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemma-4-26b-a4b-it:generateContent";
 
-        // https://generativelanguage.googleapis.com/v1beta/models/gemini-3.7-flash:generateContent
-        // https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent
 
 
         let response = client
