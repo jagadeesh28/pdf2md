@@ -6,7 +6,27 @@ use std::path::Path;
 
 #[derive(Debug, Serialize)]
 struct GeminiRequest {
+    #[serde(rename = "systemInstruction", skip_serializing_if = "Option::is_none")]
+    system_instruction: Option<Content>,
     contents: Vec<Content>,
+    #[serde(rename = "generationConfig", skip_serializing_if = "Option::is_none")]
+    generation_config: Option<GenerationConfig>,
+}
+
+#[derive(Debug, Serialize)]
+struct GenerationConfig {
+    #[serde(rename = "thinkingConfig", skip_serializing_if = "Option::is_none")]
+    thinking_config: Option<ThinkingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f32>,
+}
+
+#[derive(Debug, Serialize)]
+struct ThinkingConfig {
+    #[serde(rename = "thinkingLevel", skip_serializing_if = "Option::is_none")]
+    thinking_level: Option<String>,
+    #[serde(rename = "thinkingBudget", skip_serializing_if = "Option::is_none")]
+    thinking_budget: Option<i32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -16,9 +36,9 @@ struct Content {
 
 #[derive(Debug, Serialize)]
 struct Part {
-    #[serde(rename = "text")]
+    #[serde(rename = "text", skip_serializing_if = "Option::is_none")]
     text: Option<String>,
-    #[serde(rename = "inlineData")]
+    #[serde(rename = "inlineData", skip_serializing_if = "Option::is_none")]
     inline_data: Option<InlineData>,
 }
 
@@ -49,6 +69,8 @@ struct ContentResponse {
 #[derive(Debug, Deserialize)]
 struct PartResponse {
     text: Option<String>,
+    #[serde(default)]
+    thought: Option<bool>,
 }
 
 pub fn ocr_image_file(api_key: &str, image_path: &Path) -> Result<String> {
@@ -59,14 +81,48 @@ pub fn ocr_image_file(api_key: &str, image_path: &Path) -> Result<String> {
         tokio::runtime::Runtime::new().context("failed to create Tokio runtime for Gemini OCR")?;
 
     runtime.block_on(async {
+        let system_prompt = r#"You are an expert OCR and document transcription engine specializing in technical and scientific reports.
+Your task is to transcribe document page images into verbatim, publication-quality Obsidian-compatible Markdown.
+
+Adhere strictly to these formatting rules:
+1. Transcribe ONLY the visible document content. Never include preambles, conversational notes, thinking steps, image descriptions, or markdown code block fences (e.g. ```markdown) around the output.
+2. Structure: Use standard Markdown headings (#, ##, ###, ####) reflecting document hierarchy.
+3. Multi-Column: For multi-column pages or bibliographic metadata blocks, transcribe in natural reading order (column-by-column, top-to-bottom). Do not interleave text across adjacent columns.
+4. Tables: Represent tables faithfully using Markdown table syntax.
+5. Mathematics: Represent all mathematical notation using LaTeX delimiters supported by Obsidian: use $...$ for inline formulas/variables, and $$...$$ on separate lines for display equations.
+6. Typography: Preserve exact wording, capitalization, punctuation, bold (**text**), italic (*text*), and Roman numerals (e.g., 'ii', 'iii', 'iv'). Do not transcribe accession stamps, ink date stamps, or barcodes."#;
+
+        let user_prompt = "Transcribe all visible content from this document page verbatim into Obsidian-compatible Markdown.";
+
+        let model = std::env::var("GEMINI_MODEL")
+            .unwrap_or_else(|_| "gemini-3.5-flash-lite".to_string());
+
+        let thinking_config = if model.starts_with("gemini-2.5") {
+            Some(ThinkingConfig {
+                thinking_level: None,
+                thinking_budget: Some(0),
+            })
+        } else if model.starts_with("gemma") {
+            // Gemma models do not support thinkingConfig (returns HTTP 400)
+            None
+        } else {
+            Some(ThinkingConfig {
+                thinking_level: Some("low".to_string()),
+                thinking_budget: None,
+            })
+        };
+
         let payload = GeminiRequest {
+            system_instruction: Some(Content {
+                parts: vec![Part {
+                    text: Some(system_prompt.to_string()),
+                    inline_data: None,
+                }],
+            }),
             contents: vec![Content {
                 parts: vec![
                     Part {
-                        text: Some(r#"Transcribe all visible content from this PDF page into Obsidian-compatible Markdown.
-Preserve the document's headings, paragraphs, lists, tables, emphasis, links, and reading order(sometimes make have two or more columns). Do not add commentary, explanations, or Markdown code fences. If there is no text, return an empty string.
-Represent tables faithfully using Markdown syntax, including headers, rows, and columns.
-Represent mathematics using LaTeX delimiters supported by Obsidian: use $...$ for inline equations, formulas, and mathematical symbols, and $$...$$ on separate lines for displayed or complex equations. Use standard LaTeX commands inside math delimiters (for example, \frac{a}{b}, \sum, \alpha, and \mathbb{R}) rather than replacing mathematical notation with prose. Keep equations faithful to the page and do not invent missing content."#.to_string()),
+                        text: Some(user_prompt.to_string()),
                         inline_data: None,
                     },
                     Part {
@@ -78,19 +134,19 @@ Represent mathematics using LaTeX delimiters supported by Obsidian: use $...$ fo
                     },
                 ],
             }],
+            generation_config: Some(GenerationConfig {
+                thinking_config,
+                temperature: Some(0.0),
+            }),
         };
 
         let client = reqwest::Client::new();
-        let endpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.7-flash:generateContent";
-        // "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent";
-        //"https://generativelanguage.googleapis.com/v1beta/models/gemma-4-26b-a4b-it:generateContent";
-
-        // https://generativelanguage.googleapis.com/v1beta/models/gemini-3.7-flash:generateContent
-        // https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent
-
+        let endpoint = format!(
+            "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+        );
 
         let response = client
-            .post(format!("{endpoint}?key={api_key}"))
+            .post(endpoint)
             .json(&payload)
             .send()
             .await
@@ -109,14 +165,29 @@ Represent mathematics using LaTeX delimiters supported by Obsidian: use $...$ fo
         let parsed: GeminiResponse = serde_json::from_str(&response_text)
             .context("failed to parse Gemini OCR response JSON")?;
 
-        let text = parsed
+        let raw_text = parsed
             .candidates
             .into_iter()
             .flat_map(|candidate| candidate.content.into_iter().flat_map(|content| content.parts))
+            .filter(|part| !part.thought.unwrap_or(false))
             .filter_map(|part| part.text)
             .collect::<Vec<_>>()
             .join("\n");
 
-        Ok::<String, anyhow::Error>(text)
+        let trimmed = raw_text.trim();
+        let cleaned = if (trimmed.starts_with("```markdown") || trimmed.starts_with("```"))
+            && trimmed.ends_with("```")
+        {
+            let lines: Vec<&str> = trimmed.lines().collect();
+            if lines.len() >= 2 {
+                lines[1..lines.len() - 1].join("\n")
+            } else {
+                trimmed.to_string()
+            }
+        } else {
+            raw_text
+        };
+
+        Ok::<String, anyhow::Error>(cleaned)
     })
 }

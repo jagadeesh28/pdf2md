@@ -29,9 +29,7 @@ pub fn process_pdf(
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join("images");
-    let output_dir = output_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."));
+    let output_dir = output_path.parent().unwrap_or_else(|| Path::new("."));
 
     fs::create_dir_all(output_dir)
         .with_context(|| format!("failed to create output directory {}", output_dir.display()))?;
@@ -52,13 +50,20 @@ pub fn process_pdf(
             extracted.images.push(image);
 
             fs::write(output_path, render_markdown(&extracted)).with_context(|| {
-                format!("failed to write markdown output to {}", output_path.display())
+                format!(
+                    "failed to write markdown output to {}",
+                    output_path.display()
+                )
             })
         },
     )
     .with_context(|| format!("Gemini OCR failed for {}", input_path.display()))?;
 
-    println!("Converted {} to {}", input_path.display(), output_path.display());
+    println!(
+        "Converted {} to {}",
+        input_path.display(),
+        output_path.display()
+    );
     Ok(())
 }
 
@@ -136,13 +141,9 @@ where
     validate_page_range(begin_page, end_page)?;
 
     let temp_dir = tempfile::tempdir().context("failed to create temporary OCR directory")?;
-    let page_images = fallback::render_pages_to_images(
-        input_path,
-        temp_dir.path(),
-        begin_page,
-        end_page,
-    )
-    .with_context(|| format!("failed to rasterize PDF {} for OCR", input_path.display()))?;
+    let page_images =
+        fallback::render_pages_to_images(input_path, temp_dir.path(), begin_page, end_page)
+            .with_context(|| format!("failed to rasterize PDF {} for OCR", input_path.display()))?;
 
     fs::create_dir_all(image_output_dir).with_context(|| {
         format!(
@@ -160,9 +161,9 @@ where
     for image_path in page_images {
         let ocr_text = gemini::ocr_image_file(&api_key, &image_path)
             .with_context(|| format!("Gemini OCR failed for {}", image_path.display()))?;
-        let file_name = image_path
-            .file_name()
-            .with_context(|| format!("OCR image path has no file name: {}", image_path.display()))?;
+        let file_name = image_path.file_name().with_context(|| {
+            format!("OCR image path has no file name: {}", image_path.display())
+        })?;
         let destination = image_output_dir.join(file_name);
         fs::copy(&image_path, &destination).with_context(|| {
             format!(
@@ -273,6 +274,8 @@ mod tests {
     fn triggers_fallback_for_blank_or_short_text() {
         assert!(should_use_ocr_fallback(" "));
         assert!(should_use_ocr_fallback("tiny"));
-        assert!(!should_use_ocr_fallback("This is a real extracted paragraph with enough text."));
+        assert!(!should_use_ocr_fallback(
+            "This is a real extracted paragraph with enough text."
+        ));
     }
 }
