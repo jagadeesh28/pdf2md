@@ -245,10 +245,39 @@ where
         )
     })?;
 
-    for image_path in page_images {
+    let pdf_bytes = fs::read(input_path).ok();
+    let pdf_pages = pdf_bytes.as_ref().and_then(|bytes| {
+        pdf_extract::extract_text_from_mem_by_pages(bytes).ok()
+    });
+
+    for (page_offset, image_path) in page_images.into_iter().enumerate() {
+        let page_num = begin_page + page_offset;
+        let raw_page_text = pdf_pages
+            .as_ref()
+            .and_then(|pages| pages.get(page_num - 1))
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty());
+
         let ocr_text = match backend {
-            OcrBackend::Qwen => qwen::ocr_image_file(&image_path)
-                .with_context(|| format!("Qwen OCR failed for {}", image_path.display()))?,
+            OcrBackend::Qwen => {
+                match qwen::ocr_image_file(&image_path) {
+                    Ok(text) => text,
+                    Err(err) => {
+                        let err_msg = err.to_string();
+                        if err_msg.contains("does not support multimodal") {
+                            if let Some(txt) = raw_page_text {
+                                eprintln!("Notice: Local Qwen model is text-only; formatting extracted page text into Obsidian Markdown...");
+                                qwen::transcribe_text(txt)
+                                    .with_context(|| "failed to format extracted page text with Qwen")?
+                            } else {
+                                return Err(err);
+                            }
+                        } else {
+                            return Err(err);
+                        }
+                    }
+                }
+            }
             OcrBackend::Gemini => {
                 let api_key = std::env::var("GEMINI_API_KEY").map_err(|_| {
                     anyhow!(
@@ -308,7 +337,8 @@ pub fn render_markdown(result: &PdfExtractionResult) -> String {
         }
         output.push_str("## Embedded images\n\n");
         for (index, path) in result.images.iter().enumerate() {
-            output.push_str(&format!("![image-{}]({})\n\n", index + 1, path.display()));
+            let path_str = path.to_string_lossy().replace('\\', "/");
+            output.push_str(&format!("![image-{}]({})\n\n", index + 1, path_str));
         }
     }
 
