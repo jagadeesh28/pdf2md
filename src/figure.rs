@@ -97,30 +97,32 @@ struct ChatMessage {
     content: Option<String>,
 }
 
-const FIGURE_DETECTION_PROMPT: &str = r#"Detect all figures, charts, diagrams, drawings, plots, and graphical illustrations on this document page.
-For each figure found, extract its exact figure number or label (e.g. "Figure 1", "Figure 2.1", "Figure VII-3", "Fig. 4").
-If a figure has no explicit number, use "Figure (Untitled)".
+const FIGURE_DETECTION_PROMPT: &str = r#"You are an expert document vision analyzer.
+Your task is to detect ONLY actual, non-convertible visual figures and graphics on this page (such as plots, charts, graphs, flowcharts, schematics, engineering drawings, diagrams, and photos).
 
-Output ONLY a valid JSON array of objects in this exact schema:
+CRITICAL EXTRACTION RULES:
+1. ONLY NON-CONVERTIBLE VISUAL GRAPHICS:
+   - Crop ONLY actual visual drawings, charts, schematics, and plots that CANNOT be represented as Markdown text or Markdown tables.
+   - STRICTLY FORBIDDEN: NEVER detect or crop text paragraphs, tables of contents, "List of Figures" index pages, bibliographies, or plain textual listings. If a page only contains text or a list of figure titles, return an empty array [].
+2. INCLUDE THE FULL FIGURE TITLE AND CAPTION:
+   - The bounding box [ymin, xmin, ymax, xmax] MUST enclose the ENTIRE visual graphic CANVAS PLUS its full figure title and caption (whether located immediately below, above, or beside the graphic).
+   - Do NOT cut off the figure title/label (e.g. "Figure 4.7.—Variation of species...").
+3. EXACT BOUNDARIES:
+   - ymin: Topmost boundary of the graphic or its title (whichever is higher).
+   - xmin: Leftmost boundary of the graphic, axes, or title.
+   - ymax: Bottommost boundary of the graphic or its caption (whichever is lower).
+   - xmax: Rightmost boundary of the graphic, legend, or caption.
+   - Do NOT include surrounding page body paragraphs, page headers, or page footers.
+4. Output format: Return ONLY a valid JSON array of objects in this exact schema:
 [
   {
-    "figure_number": "Figure VII-3",
+    "figure_number": "Figure 4.7",
     "box_2d": [ymin, xmin, ymax, xmax]
   }
 ]
-
-CRITICAL RULES FOR EXACT BOUNDARIES:
-1. Coordinate format: [ymin, xmin, ymax, xmax] normalized to integers from 0 to 1000 (0,0 is top-left, 1000,1000 is bottom-right).
-   - ymin: Topmost edge of the graphic.
-   - xmin: Leftmost edge of the graphic.
-   - ymax: Bottom edge of the graphic (or bottom of the figure caption if caption is right below the graphic).
-   - xmax: Rightmost edge of the graphic.
-2. TIGHT CROPPING: The bounding box must tightly enclose ONLY the graphical figure, chart, plot, diagram, flowchart, or illustration and its immediate figure caption.
-   - DO NOT include page running headers, page footers, or page numbers.
-   - DO NOT include surrounding body text paragraphs or columns above, below, or beside the figure.
-   - DO NOT include large blank margins around the figure.
-3. If no figures or graphical illustrations are present on the page, return an empty array: []
-4. Return ONLY the raw JSON array. Never include markdown fences or conversational explanations."#;
+- Coordinates: [ymin, xmin, ymax, xmax] normalized integers from 0 to 1000 (0,0 is top-left, 1000,1000 is bottom-right).
+- If no actual visual drawings, plots, or diagrams exist on this page, return []
+- Return ONLY raw JSON without markdown fences or commentary."#;
 
 /// Detects figures on a document page image using Qwen Vision, refines boundaries tightly,
 /// and crops each into output_dir without overwriting existing files.
@@ -208,12 +210,24 @@ pub fn detect_and_crop_figures(
             (x, y, w, h)
         };
 
-        if px_w < 15 || px_h < 15 {
+        // Filter out tiny slivers or text lines:
+        // A visual figure must have substantial dimensions (at least 60x60 px or min area).
+        // Slender horizontal text strips (e.g., width 150, height 30, or vice versa) from TOC/index lists must be rejected.
+        if px_w < 60 || px_h < 60 || (px_w * px_h) < 5000 {
+            println!(
+                "Skipping candidate '{}' on page {page_num}: dimensions too small for a visual graphic ({}x{})",
+                det.figure_number, px_w, px_h
+            );
             continue;
         }
 
         // Tightly refine boundaries to content (trimming excess blank borders and ensuring clean edges)
         let (crop_x, crop_y, crop_w, crop_h) = refine_crop_boundaries(&img, px_x, px_y, px_w, px_h);
+
+        // Verify refined crop meets minimum visual figure dimensions
+        if crop_w < 50 || crop_h < 50 {
+            continue;
+        }
 
         let clean_label = sanitize_figure_label(&det.figure_number, page_num, idx + 1);
         let (filename, figure_path) = resolve_unique_figure_path(output_images_dir, &clean_label);
