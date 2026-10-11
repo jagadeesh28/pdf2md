@@ -121,12 +121,14 @@ pub fn ocr_image_file(api_key: &str, image_path: &Path) -> Result<String> {
         };
 
         let client = reqwest::Client::new();
-        let endpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemma-4-26b-a4b-it:generateContent";
-
-
+        let model = std::env::var("GEMMA_MODEL")
+            .unwrap_or_else(|_| "gemma-4-26b-a4b-it".to_string());
+        let endpoint = format!(
+            "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+        );
 
         let response = client
-            .post(format!("{endpoint}?key={api_key}"))
+            .post(endpoint)
             .json(&payload)
             .send()
             .await

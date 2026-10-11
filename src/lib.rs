@@ -1,9 +1,52 @@
-mod fallback;
-mod gemini;
+pub mod fallback;
+pub mod gemini;
+pub mod gemma;
+pub mod qwen;
 
 use anyhow::{Context, Result, anyhow};
 use std::fs;
 use std::path::{Path, PathBuf};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OcrBackend {
+    #[default]
+    Qwen,
+    Gemini,
+    Gemma,
+}
+
+impl std::str::FromStr for OcrBackend {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "qwen" | "qwen-coder" | "qwencoder" | "local" => Ok(OcrBackend::Qwen),
+            "gemini" => Ok(OcrBackend::Gemini),
+            "gemma" => Ok(OcrBackend::Gemma),
+            other => Err(anyhow!(
+                "unknown OCR backend '{other}'; valid options are: qwen, gemini, gemma"
+            )),
+        }
+    }
+}
+
+impl std::fmt::Display for OcrBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OcrBackend::Qwen => write!(f, "qwen"),
+            OcrBackend::Gemini => write!(f, "gemini"),
+            OcrBackend::Gemma => write!(f, "gemma"),
+        }
+    }
+}
+
+pub fn resolve_default_backend() -> OcrBackend {
+    if let Ok(val) = std::env::var("PDF2MD_BACKEND").or_else(|_| std::env::var("OCR_BACKEND")) {
+        val.parse().unwrap_or(OcrBackend::Qwen)
+    } else {
+        OcrBackend::Qwen
+    }
+}
 
 #[derive(Debug, Default)]
 pub struct PdfExtractionResult {
@@ -23,6 +66,17 @@ pub fn process_pdf(
     begin_page: usize,
     end_page: usize,
 ) -> Result<()> {
+    let backend = resolve_default_backend();
+    process_pdf_with_backend(input_path, output_path, begin_page, end_page, backend)
+}
+
+pub fn process_pdf_with_backend(
+    input_path: &Path,
+    output_path: &Path,
+    begin_page: usize,
+    end_page: usize,
+    backend: OcrBackend,
+) -> Result<()> {
     validate_page_range(begin_page, end_page)?;
 
     let image_output_dir = output_path
@@ -35,11 +89,12 @@ pub fn process_pdf(
         .with_context(|| format!("failed to create output directory {}", output_dir.display()))?;
 
     let mut extracted = PdfExtractionResult::default();
-    process_ocr_pages(
+    process_ocr_pages_with_backend(
         input_path,
         &image_output_dir,
         begin_page,
         end_page,
+        backend,
         |text, image| {
             if !text.trim().is_empty() {
                 extracted.text.push_str(&text);
@@ -57,10 +112,10 @@ pub fn process_pdf(
             })
         },
     )
-    .with_context(|| format!("Gemini OCR failed for {}", input_path.display()))?;
+    .with_context(|| format!("{backend} OCR failed for {}", input_path.display()))?;
 
     println!(
-        "Converted {} to {}",
+        "Converted {} to {} using {backend} backend",
         input_path.display(),
         output_path.display()
     );
@@ -109,12 +164,29 @@ pub fn fall_back_to_ocr(
     begin_page: usize,
     end_page: usize,
 ) -> Result<PdfExtractionResult> {
-    let mut result = PdfExtractionResult::default();
-    process_ocr_pages(
+    fall_back_to_ocr_with_backend(
         input_path,
         image_output_dir,
         begin_page,
         end_page,
+        resolve_default_backend(),
+    )
+}
+
+pub fn fall_back_to_ocr_with_backend(
+    input_path: &Path,
+    image_output_dir: &Path,
+    begin_page: usize,
+    end_page: usize,
+    backend: OcrBackend,
+) -> Result<PdfExtractionResult> {
+    let mut result = PdfExtractionResult::default();
+    process_ocr_pages_with_backend(
+        input_path,
+        image_output_dir,
+        begin_page,
+        end_page,
+        backend,
         |text, image| {
             if !text.trim().is_empty() {
                 result.text.push_str(&text);
@@ -128,11 +200,32 @@ pub fn fall_back_to_ocr(
     Ok(result)
 }
 
-fn process_ocr_pages<F>(
+pub fn process_ocr_pages<F>(
     input_path: &Path,
     image_output_dir: &Path,
     begin_page: usize,
     end_page: usize,
+    on_page: F,
+) -> Result<()>
+where
+    F: FnMut(String, PathBuf) -> Result<()>,
+{
+    process_ocr_pages_with_backend(
+        input_path,
+        image_output_dir,
+        begin_page,
+        end_page,
+        resolve_default_backend(),
+        on_page,
+    )
+}
+
+pub fn process_ocr_pages_with_backend<F>(
+    input_path: &Path,
+    image_output_dir: &Path,
+    begin_page: usize,
+    end_page: usize,
+    backend: OcrBackend,
     mut on_page: F,
 ) -> Result<()>
 where
@@ -152,15 +245,32 @@ where
         )
     })?;
 
-    let api_key = std::env::var("GEMINI_API_KEY").map_err(|_| {
-        anyhow::anyhow!(
-            "Gemini OCR requires GEMINI_API_KEY. Set it before converting a PDF, e.g. on Windows: $env:GEMINI_API_KEY='your_api_key'"
-        )
-    })?;
-
     for image_path in page_images {
-        let ocr_text = gemini::ocr_image_file(&api_key, &image_path)
-            .with_context(|| format!("Gemini OCR failed for {}", image_path.display()))?;
+        let ocr_text = match backend {
+            OcrBackend::Qwen => qwen::ocr_image_file(&image_path)
+                .with_context(|| format!("Qwen OCR failed for {}", image_path.display()))?,
+            OcrBackend::Gemini => {
+                let api_key = std::env::var("GEMINI_API_KEY").map_err(|_| {
+                    anyhow!(
+                        "Gemini OCR requires GEMINI_API_KEY. Set it before converting a PDF, e.g.: export GEMINI_API_KEY='your_api_key'"
+                    )
+                })?;
+                gemini::ocr_image_file(&api_key, &image_path)
+                    .with_context(|| format!("Gemini OCR failed for {}", image_path.display()))?
+            }
+            OcrBackend::Gemma => {
+                let api_key = std::env::var("GEMMA_API_KEY")
+                    .or_else(|_| std::env::var("GEMINI_API_KEY"))
+                    .map_err(|_| {
+                        anyhow!(
+                            "Gemma OCR requires GEMMA_API_KEY or GEMINI_API_KEY. Set it before converting a PDF, e.g.: export GEMMA_API_KEY='your_api_key'"
+                        )
+                    })?;
+                gemma::ocr_image_file(&api_key, &image_path)
+                    .with_context(|| format!("Gemma OCR failed for {}", image_path.display()))?
+            }
+        };
+
         let file_name = image_path.file_name().with_context(|| {
             format!("OCR image path has no file name: {}", image_path.display())
         })?;
@@ -277,5 +387,21 @@ mod tests {
         assert!(!should_use_ocr_fallback(
             "This is a real extracted paragraph with enough text."
         ));
+    }
+
+    #[test]
+    fn parses_ocr_backends_correctly() {
+        use super::OcrBackend;
+        assert_eq!("qwen".parse::<OcrBackend>().unwrap(), OcrBackend::Qwen);
+        assert_eq!("qwen-coder".parse::<OcrBackend>().unwrap(), OcrBackend::Qwen);
+        assert_eq!("gemini".parse::<OcrBackend>().unwrap(), OcrBackend::Gemini);
+        assert_eq!("gemma".parse::<OcrBackend>().unwrap(), OcrBackend::Gemma);
+        assert!("unknown".parse::<OcrBackend>().is_err());
+    }
+
+    #[test]
+    fn default_backend_is_qwen() {
+        use super::OcrBackend;
+        assert_eq!(OcrBackend::default(), OcrBackend::Qwen);
     }
 }
