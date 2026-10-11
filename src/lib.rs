@@ -259,67 +259,191 @@ where
         pdf_extract::extract_text_from_mem_by_pages(bytes).ok()
     });
 
+    let concurrency = resolve_concurrency();
+    let total_pages = page_images.len();
+
+    // Prepare page items with metadata
+    let mut page_items = Vec::with_capacity(total_pages);
     for (page_offset, image_path) in page_images.into_iter().enumerate() {
         let page_num = begin_page + page_offset;
         let raw_page_text = pdf_pages
             .as_ref()
             .and_then(|pages| pages.get(page_num - 1))
-            .map(|s| s.trim())
+            .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
+        page_items.push((page_num, image_path, raw_page_text));
+    }
 
-        let ocr_text = match backend {
-            OcrBackend::Qwen => {
-                match qwen::ocr_image_file(&image_path) {
-                    Ok(text) => text,
-                    Err(err) => {
-                        let err_msg = err.to_string();
-                        if err_msg.contains("does not support multimodal") {
-                            if let Some(txt) = raw_page_text {
-                                eprintln!("Notice: Local Qwen model is text-only; formatting extracted page text into Obsidian Markdown...");
-                                qwen::transcribe_text(txt)
-                                    .with_context(|| "failed to format extracted page text with Qwen")?
-                            } else {
-                                return Err(err);
-                            }
-                        } else {
-                            return Err(err);
-                        }
+    if concurrency <= 1 || total_pages <= 1 {
+        // Sequential execution
+        for (page_num, image_path, raw_page_text) in page_items {
+            let (ocr_text, cropped_figures) = process_single_page(
+                backend,
+                &image_path,
+                image_output_dir,
+                page_num,
+                raw_page_text.as_deref(),
+            )?;
+            on_page(ocr_text, cropped_figures)?;
+        }
+    } else {
+        // Concurrent worker execution preserving exact page order
+        use std::collections::BTreeMap;
+        use std::sync::mpsc;
+        use std::thread;
+
+        println!(
+            "Processing {total_pages} pages concurrently with concurrency={concurrency} (maintaining exact page order)..."
+        );
+
+        let (work_tx, work_rx) = std::sync::mpsc::channel();
+        for item in page_items {
+            let _ = work_tx.send(item);
+        }
+        drop(work_tx); // Close queue so workers terminate when all pages are consumed
+
+        let (result_tx, result_rx) = mpsc::channel();
+
+        let mut worker_handles = Vec::with_capacity(concurrency);
+        let work_rx = std::sync::Arc::new(std::sync::Mutex::new(work_rx));
+
+        for _ in 0..concurrency {
+            let work_rx_clone = std::sync::Arc::clone(&work_rx);
+            let result_tx_clone = result_tx.clone();
+            let img_out_dir = image_output_dir.to_path_buf();
+
+            let handle = thread::spawn(move || {
+                loop {
+                    let item = {
+                        let Ok(rx) = work_rx_clone.lock() else { break };
+                        rx.recv().ok()
+                    };
+
+                    let Some((page_num, image_path, raw_page_text)) = item else {
+                        break;
+                    };
+
+                    let page_res = process_single_page(
+                        backend,
+                        &image_path,
+                        &img_out_dir,
+                        page_num,
+                        raw_page_text.as_deref(),
+                    );
+
+                    if result_tx_clone.send((page_num, page_res)).is_err() {
+                        break;
                     }
                 }
-            }
-            OcrBackend::Gemini => {
-                let api_key = std::env::var("GEMINI_API_KEY").map_err(|_| {
-                    anyhow!(
-                        "Gemini OCR requires GEMINI_API_KEY. Set it before converting a PDF, e.g.: export GEMINI_API_KEY='your_api_key'"
-                    )
-                })?;
-                gemini::ocr_image_file(&api_key, &image_path)
-                    .with_context(|| format!("Gemini OCR failed for {}", image_path.display()))?
-            }
-            OcrBackend::Gemma => {
-                let api_key = std::env::var("GEMMA_API_KEY")
-                    .or_else(|_| std::env::var("GEMINI_API_KEY"))
-                    .map_err(|_| {
-                        anyhow!(
-                            "Gemma OCR requires GEMMA_API_KEY or GEMINI_API_KEY. Set it before converting a PDF, e.g.: export GEMMA_API_KEY='your_api_key'"
-                        )
-                    })?;
-                gemma::ocr_image_file(&api_key, &image_path)
-                    .with_context(|| format!("Gemma OCR failed for {}", image_path.display()))?
-            }
-        };
-
-        // Detect and crop figures on this page using Qwen Vision into image_output_dir
-        let cropped_figures = figure::detect_and_crop_figures(&image_path, image_output_dir, page_num)
-            .unwrap_or_else(|err| {
-                eprintln!("Figure detection skipped for page {page_num}: {err:#}");
-                Vec::new()
             });
+            worker_handles.push(handle);
+        }
+        drop(result_tx); // Drop extra sender so rx closes when workers complete
 
-        on_page(ocr_text, cropped_figures)?;
+        // Stream results to on_page strictly in ascending page order (begin_page..=end_page)
+        let mut pending_results: BTreeMap<usize, (String, Vec<figure::CroppedFigure>)> = BTreeMap::new();
+        let mut next_expected_page = begin_page;
+
+        while let Ok((page_num, page_res)) = result_rx.recv() {
+            let (ocr_text, figures) = page_res?;
+            pending_results.insert(page_num, (ocr_text, figures));
+
+            while let Some((&page, _)) = pending_results.iter().next() {
+                if page == next_expected_page {
+                    let (_, (ocr_text, figures)) = pending_results.remove_entry(&page).unwrap();
+                    on_page(ocr_text, figures)?;
+                    next_expected_page += 1;
+                } else {
+                    break;
+                }
+            }
+        }
+
+        // Wait for all workers to cleanly exit
+        for handle in worker_handles {
+            let _ = handle.join();
+        }
+
+        // Emit any remaining pages in order
+        while let Some((page, (ocr_text, figures))) = pending_results.pop_first() {
+            if page == next_expected_page {
+                next_expected_page += 1;
+            }
+            on_page(ocr_text, figures)?;
+        }
     }
 
     Ok(())
+}
+
+fn process_single_page(
+    backend: OcrBackend,
+    image_path: &Path,
+    image_output_dir: &Path,
+    page_num: usize,
+    raw_page_text: Option<&str>,
+) -> Result<(String, Vec<figure::CroppedFigure>)> {
+    let ocr_text = match backend {
+        OcrBackend::Qwen => match qwen::ocr_image_file(image_path) {
+            Ok(text) => text,
+            Err(err) => {
+                let err_msg = err.to_string();
+                if err_msg.contains("does not support multimodal") {
+                    if let Some(txt) = raw_page_text {
+                        eprintln!(
+                            "Notice: Local Qwen model is text-only; formatting extracted page {page_num} text into Obsidian Markdown..."
+                        );
+                        qwen::transcribe_text(txt).with_context(|| {
+                            format!("failed to format extracted page {page_num} text with Qwen")
+                        })?
+                    } else {
+                        return Err(err);
+                    }
+                } else {
+                    return Err(err);
+                }
+            }
+        },
+        OcrBackend::Gemini => {
+            let api_key = std::env::var("GEMINI_API_KEY").map_err(|_| {
+                anyhow!(
+                    "Gemini OCR requires GEMINI_API_KEY. Set it before converting a PDF, e.g.: export GEMINI_API_KEY='your_api_key'"
+                )
+            })?;
+            gemini::ocr_image_file(&api_key, image_path)
+                .with_context(|| format!("Gemini OCR failed for {}", image_path.display()))?
+        }
+        OcrBackend::Gemma => {
+            let api_key = std::env::var("GEMMA_API_KEY")
+                .or_else(|_| std::env::var("GEMINI_API_KEY"))
+                .map_err(|_| {
+                    anyhow!(
+                        "Gemma OCR requires GEMMA_API_KEY or GEMINI_API_KEY. Set it before converting a PDF, e.g.: export GEMMA_API_KEY='your_api_key'"
+                    )
+                })?;
+            gemma::ocr_image_file(&api_key, image_path)
+                .with_context(|| format!("Gemma OCR failed for {}", image_path.display()))?
+        }
+    };
+
+    // Detect and crop figures on this page using Qwen Vision into image_output_dir
+    let cropped_figures = figure::detect_and_crop_figures(image_path, image_output_dir, page_num)
+        .unwrap_or_else(|err| {
+            eprintln!("Figure detection skipped for page {page_num}: {err:#}");
+            Vec::new()
+        });
+
+    Ok((ocr_text, cropped_figures))
+}
+
+pub fn resolve_concurrency() -> usize {
+    if let Ok(val) = std::env::var("PDF2MD_CONCURRENCY").or_else(|_| std::env::var("CONCURRENCY"))
+        && let Ok(parsed) = val.parse::<usize>()
+    {
+        return parsed.max(1);
+    }
+    // Default to 2 concurrent page workers to achieve 2x speedup without overloading VRAM
+    2
 }
 
 pub fn should_use_ocr_fallback(text: &str) -> bool {
@@ -472,5 +596,10 @@ mod tests {
         assert!(output.contains("## Figures"));
         assert!(output.contains("![Figure VII-3](images/Figure-VII-3.png)"));
         assert!(output.contains("*Figure VII-3*"));
+    }
+
+    #[test]
+    fn test_resolve_concurrency() {
+        assert!(super::resolve_concurrency() >= 1);
     }
 }

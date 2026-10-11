@@ -15,12 +15,13 @@ Supported backends:
     gemma  - Google Gemma API (requires GEMMA_API_KEY or GEMINI_API_KEY)
 
 Environment variables:
-    PDF2MD_BACKEND  Default OCR backend (default: qwen)
-    QWEN_URL        Local Qwen endpoint URL (default: http://localhost:11434/v1)
-    QWEN_MODEL      Model name (default: qwen2.5-coder:latest)
-    QWEN_API_KEY    Optional API key for local endpoint
-    GEMINI_API_KEY  Gemini API key
-    GEMMA_API_KEY   Gemma API key
+    PDF2MD_BACKEND      Default OCR backend (default: qwen)
+    PDF2MD_CONCURRENCY  Number of concurrent page workers (default: 2)
+    QWEN_URL            Local Qwen endpoint URL (default: http://localhost:11434/v1)
+    QWEN_MODEL          Model name (default: qwen2.5-coder:latest)
+    QWEN_API_KEY        Optional API key for local endpoint
+    GEMINI_API_KEY      Gemini API key
+    GEMMA_API_KEY       Gemma API key
 "#
     );
 }
