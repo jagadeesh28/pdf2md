@@ -111,7 +111,7 @@ CRITICAL EXTRACTION RULES:
    - ymax MUST be the bottom of the caption text line(s). Any normal paragraph text following the caption is regular document text and MUST be excluded.
 3. EXACT BOUNDARIES:
    - xmin: Leftmost boundary of the graphic, axes, or title.
-   - ymin: Topmost boundary of the graphic or its title (whichever is higher).
+   - ymin: Topmost boundary of the graphic canvas, top border line, axis labels, or title (whichever is highest). Do NOT clip the top border line or uppermost curve.
    - xmax: Rightmost boundary of the graphic, legend, or caption.
    - ymax: Bottommost baseline of the figure caption. STRICTLY exclude body paragraphs beneath it.
    - Do NOT include surrounding page body paragraphs, page headers, or page footers.
@@ -439,9 +439,10 @@ pub fn refine_crop_boundaries(
         return (px_x, px_y, px_w, px_h);
     }
 
-    // Expand search area slightly (1.5% of dimension, min 4px) to ensure no border lines or caption descenders are clipped
-    let margin_x = ((img_w as f32) * 0.015).clamp(4.0, 20.0) as u32;
-    let margin_y = ((img_h as f32) * 0.015).clamp(4.0, 20.0) as u32;
+    // Expand search area slightly (3.5% of dimension, min 15px, max 45px) to ensure no top borders,
+    // axis labels, superscript titles, or caption descenders are clipped even if the model's box was slightly tight.
+    let margin_x = ((img_w as f32) * 0.035).clamp(15.0, 45.0) as u32;
+    let margin_y = ((img_h as f32) * 0.035).clamp(15.0, 45.0) as u32;
 
     let search_x1 = px_x.saturating_sub(margin_x);
     let search_y1 = px_y.saturating_sub(margin_y);
@@ -492,7 +493,7 @@ pub fn refine_crop_boundaries(
 
     let min_content_pixels = 2; // Avoid single-pixel noise/scanner artifacts
 
-    // Scan horizontal rows from top to find start of content
+    // Scan horizontal rows from top down to find start of content
     let mut content_y1 = None;
     for y in search_y1..search_y2 {
         let count = (search_x1..search_x2).filter(|&x| is_content(x, y)).take(min_content_pixels).count();
@@ -560,8 +561,8 @@ pub fn refine_crop_boundaries(
 
     match (content_x1, content_y1, content_x2, content_y2) {
         (Some(cx1), Some(cy1), Some(cx2), Some(cy2)) if cx2 > cx1 && cy2 > cy1 => {
-            // Add a clean, consistent 8-pixel margin around graphic
-            let pad = 8u32;
+            // Add a clean, consistent 14-pixel margin around graphic so top/bottom/side edges are never clipped
+            let pad = 14u32;
             let final_x = cx1.saturating_sub(pad);
             let final_y = cy1.saturating_sub(pad);
             let final_x2 = (cx2 + pad + 1).min(img_w);
@@ -672,15 +673,15 @@ mod tests {
         // Suppose Qwen returned a loose box: x=30, y=40, w=120, h=110
         let (rx, ry, rw, rh) = refine_crop_boundaries(&dyn_img, 30, 40, 120, 110);
 
-        // With 8px padding:
-        // x should be 50 - 8 = 42
-        // y should be 60 - 8 = 52
-        // x2 should be 129 + 8 + 1 = 138 -> w = 138 - 42 = 96
-        // y2 should be 129 + 8 + 1 = 138 -> h = 138 - 52 = 86
-        assert_eq!(rx, 42);
-        assert_eq!(ry, 52);
-        assert_eq!(rw, 96);
-        assert_eq!(rh, 86);
+        // With 14px padding:
+        // x should be 50 - 14 = 36
+        // y should be 60 - 14 = 46
+        // x2 should be 129 + 14 + 1 = 144 -> w = 144 - 36 = 108
+        // y2 should be 129 + 14 + 1 = 144 -> h = 144 - 46 = 98
+        assert_eq!(rx, 36);
+        assert_eq!(ry, 46);
+        assert_eq!(rw, 108);
+        assert_eq!(rh, 98);
     }
 
     #[test]
@@ -710,8 +711,8 @@ mod tests {
         let (_rx, ry, rw, rh) = refine_crop_boundaries(&dyn_img, 10, 10, 260, 350);
 
         // The refinement must detect the blank gap after y=150 and truncate before the trailing paragraph
-        assert_eq!(ry, 12); // 20 - 8pad
-        assert!(ry + rh <= 160, "Refined bottom {} should be at or before gap (<= 160)", ry + rh);
+        assert_eq!(ry, 6); // 20 - 14pad
+        assert!(ry + rh <= 170, "Refined bottom {} should be at or before gap (<= 170)", ry + rh);
         assert!(rw >= 200, "Refined width {} should cover the content", rw);
     }
 }
