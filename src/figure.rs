@@ -30,6 +30,7 @@ pub enum BoundingBoxCoords {
 }
 
 impl BoundingBoxCoords {
+    /// Returns coordinates as `(xmin, ymin, xmax, ymax)`.
     pub fn to_coords(&self) -> Option<(f32, f32, f32, f32)> {
         match self {
             BoundingBoxCoords::Array(arr) => {
@@ -40,7 +41,7 @@ impl BoundingBoxCoords {
                 }
             }
             BoundingBoxCoords::Map { ymin, xmin, ymax, xmax } => {
-                Some((*ymin, *xmin, *ymax, *xmax))
+                Some((*xmin, *ymin, *xmax, *ymax))
             }
         }
     }
@@ -105,22 +106,22 @@ CRITICAL EXTRACTION RULES:
    - Crop ONLY actual visual drawings, charts, schematics, and plots that CANNOT be represented as Markdown text or Markdown tables.
    - STRICTLY FORBIDDEN: NEVER detect or crop text paragraphs, tables of contents, "List of Figures" index pages, bibliographies, or plain textual listings. If a page only contains text or a list of figure titles, return an empty array [].
 2. INCLUDE THE FULL FIGURE TITLE AND CAPTION:
-   - The bounding box [ymin, xmin, ymax, xmax] MUST enclose the ENTIRE visual graphic CANVAS PLUS its full figure title and caption (whether located immediately below, above, or beside the graphic).
+   - The bounding box [xmin, ymin, xmax, ymax] MUST enclose the ENTIRE visual graphic CANVAS PLUS its full figure title and caption (whether located immediately below, above, or beside the graphic).
    - Do NOT cut off the figure title/label (e.g. "Figure 4.7.—Variation of species...").
 3. EXACT BOUNDARIES:
-   - ymin: Topmost boundary of the graphic or its title (whichever is higher).
    - xmin: Leftmost boundary of the graphic, axes, or title.
-   - ymax: Bottommost boundary of the graphic or its caption (whichever is lower).
+   - ymin: Topmost boundary of the graphic or its title (whichever is higher).
    - xmax: Rightmost boundary of the graphic, legend, or caption.
+   - ymax: Bottommost boundary of the graphic or its caption (whichever is lower).
    - Do NOT include surrounding page body paragraphs, page headers, or page footers.
 4. Output format: Return ONLY a valid JSON array of objects in this exact schema:
 [
   {
     "figure_number": "Figure 4.7",
-    "box_2d": [ymin, xmin, ymax, xmax]
+    "box_2d": [xmin, ymin, xmax, ymax]
   }
 ]
-- Coordinates: [ymin, xmin, ymax, xmax] normalized integers from 0 to 1000 (0,0 is top-left, 1000,1000 is bottom-right).
+- Coordinates: [xmin, ymin, xmax, ymax] (0,0 is top-left).
 - If no actual visual drawings, plots, or diagrams exist on this page, return []
 - Return ONLY raw JSON without markdown fences or commentary."#;
 
@@ -160,17 +161,17 @@ pub fn detect_and_crop_figures(
     let (img_w, img_h) = img.dimensions();
 
     for (idx, det) in detections.into_iter().enumerate() {
-        let (mut ymin, mut xmin, mut ymax, mut xmax) = match det.box_2d.to_coords() {
+        let (mut xmin, mut ymin, mut xmax, mut ymax) = match det.box_2d.to_coords() {
             Some(coords) => coords,
             None => continue,
         };
 
         // Ensure proper ordering if inverted
-        if ymin > ymax {
-            std::mem::swap(&mut ymin, &mut ymax);
-        }
         if xmin > xmax {
             std::mem::swap(&mut xmin, &mut xmax);
+        }
+        if ymin > ymax {
+            std::mem::swap(&mut ymin, &mut ymax);
         }
 
         // Determine coordinate scale:
@@ -581,7 +582,7 @@ mod tests {
         let res = parse_detection_json(json_data).unwrap();
         assert_eq!(res.len(), 1);
         assert_eq!(res[0].figure_number, "Figure 1");
-        assert_eq!(res[0].box_2d.to_coords(), Some((50.0, 60.0, 400.0, 500.0)));
+        assert_eq!(res[0].box_2d.to_coords(), Some((60.0, 50.0, 500.0, 400.0)));
     }
 
     #[test]
