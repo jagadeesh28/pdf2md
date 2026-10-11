@@ -90,7 +90,8 @@ Adhere strictly to these formatting rules:
 3. Multi-Column: For multi-column pages or bibliographic metadata blocks, transcribe in natural reading order (column-by-column, top-to-bottom). Do not interleave text across adjacent columns.
 4. Tables: Represent tables faithfully using Markdown table syntax.
 5. Mathematics: Represent all mathematical notation using LaTeX delimiters supported by Obsidian: use $...$ for inline formulas/variables, and $$...$$ on separate lines for display equations.
-6. Typography: Preserve exact wording, capitalization, punctuation, bold (**text**), italic (*text*), and Roman numerals (e.g., 'ii', 'iii', 'iv'). Do not transcribe accession stamps, ink date stamps, or barcodes."#;
+6. Typography: Preserve exact wording, capitalization, punctuation, bold (**text**), italic (*text*), and Roman numerals (e.g., 'ii', 'iii', 'iv'). Do not transcribe accession stamps, ink date stamps, or barcodes.
+7. Figures and Captions: For any figures, diagrams, plots, charts, or illustrations on the page, always transcribe the figure number and complete caption verbatim in the Markdown text at the location where they appear (e.g. `*Figure 4.5.—Caption text...*`). Do NOT omit figure numbers or figure captions from the text transcription."#;
 
         let user_prompt = "Transcribe all visible content from this document page verbatim into Obsidian-compatible Markdown.";
 

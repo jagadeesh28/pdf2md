@@ -15,7 +15,6 @@ pub fn render_pages_to_images(
     
     let pdf_bytes = fs::read(pdf_path)
         .with_context(|| format!("failed to read PDF for rendering: {}", pdf_path.display()))?;
-    println!("REached 1");
     let document = Pdf::new(pdf_bytes).map_err(|error| {
         anyhow!(
             "failed to parse PDF for rendering {}: {error:?}",

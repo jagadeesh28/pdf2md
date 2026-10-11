@@ -453,7 +453,60 @@ fn process_single_page(
             Vec::new()
         });
 
+    let ocr_text = attach_figures_to_page_text(&ocr_text, &cropped_figures);
+
     Ok((ocr_text, cropped_figures))
+}
+
+pub fn attach_figures_to_page_text(
+    page_text: &str,
+    figures: &[figure::CroppedFigure],
+) -> String {
+    if figures.is_empty() {
+        return page_text.to_string();
+    }
+
+    let mut result = page_text.to_string();
+
+    for fig in figures {
+        let image_link = format!("![{}](images/{})", fig.figure_label, fig.filename);
+        if result.contains(&image_link) || result.contains(&fig.filename) {
+            continue;
+        }
+
+        let caption_text = match &fig.caption {
+            Some(cap) if !cap.trim().is_empty() => {
+                let trimmed = cap.trim();
+                let lower_label = fig.figure_label.to_lowercase();
+                let lower_cap = trimmed.to_lowercase();
+                if lower_cap.starts_with(&lower_label) {
+                    trimmed.to_string()
+                } else {
+                    format!("{}. {}", fig.figure_label, trimmed)
+                }
+            }
+            _ => fig.figure_label.clone(),
+        };
+
+        let lower_text = result.to_lowercase();
+        let lower_label = fig.figure_label.to_lowercase();
+
+        if let Some(pos) = lower_text.find(&lower_label) {
+            let line_start = result[..pos].rfind('\n').map(|i| i + 1).unwrap_or(0);
+            result.insert_str(line_start, &format!("{image_link}\n\n"));
+        } else {
+            if !result.is_empty() && !result.ends_with("\n\n") {
+                if result.ends_with('\n') {
+                    result.push('\n');
+                } else {
+                    result.push_str("\n\n");
+                }
+            }
+            result.push_str(&format!("{image_link}\n\n*{caption_text}*\n\n"));
+        }
+    }
+
+    result
 }
 
 pub fn resolve_concurrency() -> usize {
@@ -486,9 +539,22 @@ pub fn render_markdown(result: &PdfExtractionResult) -> String {
         }
         output.push_str("## Figures\n\n");
         for fig in &result.figures {
+            let caption_text = match &fig.caption {
+                Some(cap) if !cap.trim().is_empty() => {
+                    let trimmed = cap.trim();
+                    let lower_label = fig.figure_label.to_lowercase();
+                    let lower_cap = trimmed.to_lowercase();
+                    if lower_cap.starts_with(&lower_label) {
+                        trimmed.to_string()
+                    } else {
+                        format!("{}. {}", fig.figure_label, trimmed)
+                    }
+                }
+                _ => fig.figure_label.clone(),
+            };
             output.push_str(&format!(
                 "![{}](images/{})\n*{}*\n\n",
-                fig.figure_label, fig.filename, fig.figure_label
+                fig.figure_label, fig.filename, caption_text
             ));
         }
     } else if !result.images.is_empty() {
@@ -606,6 +672,7 @@ mod tests {
             figures: vec![
                 super::figure::CroppedFigure {
                     figure_label: "Figure VII-3".to_string(),
+                    caption: None,
                     filename: "Figure-VII-3.png".to_string(),
                     file_path: std::path::PathBuf::from("output/images/Figure-VII-3.png"),
                 },
@@ -616,6 +683,50 @@ mod tests {
         assert!(output.contains("## Figures"));
         assert!(output.contains("![Figure VII-3](images/Figure-VII-3.png)"));
         assert!(output.contains("*Figure VII-3*"));
+    }
+
+    #[test]
+    fn renders_figures_with_caption() {
+        let result = PdfExtractionResult {
+            text: "# Section\nSome text".to_string(),
+            images: vec![],
+            figures: vec![
+                super::figure::CroppedFigure {
+                    figure_label: "Figure 4.7".to_string(),
+                    caption: Some("Variation of species mole fractions with distance.".to_string()),
+                    filename: "Figure-4-7.png".to_string(),
+                    file_path: std::path::PathBuf::from("output/images/Figure-4-7.png"),
+                },
+            ],
+        };
+
+        let output = render_markdown(&result);
+        assert!(output.contains("## Figures"));
+        assert!(output.contains("![Figure 4.7](images/Figure-4-7.png)"));
+        assert!(output.contains("*Figure 4.7. Variation of species mole fractions with distance.*"));
+    }
+
+    #[test]
+    fn test_attach_figures_to_page_text() {
+        let figures = vec![
+            super::figure::CroppedFigure {
+                figure_label: "Figure 4.7".to_string(),
+                caption: Some("Variation of species mole fractions with distance.".to_string()),
+                filename: "Figure-4-7.png".to_string(),
+                file_path: std::path::PathBuf::from("output/images/Figure-4-7.png"),
+            },
+        ];
+
+        // Case 1: Figure label is present in page text
+        let page_text = "Introductory paragraph.\n\nFigure 4.7.—Variation of species.\n\nNext paragraph.";
+        let attached = super::attach_figures_to_page_text(page_text, &figures);
+        assert!(attached.contains("![Figure 4.7](images/Figure-4-7.png)\n\nFigure 4.7.—Variation of species."));
+
+        // Case 2: Figure label is absent from page text
+        let page_text_no_label = "Page with only text paragraphs.";
+        let attached2 = super::attach_figures_to_page_text(page_text_no_label, &figures);
+        assert!(attached2.contains("![Figure 4.7](images/Figure-4-7.png)"));
+        assert!(attached2.contains("*Figure 4.7. Variation of species mole fractions with distance.*"));
     }
 
     #[test]

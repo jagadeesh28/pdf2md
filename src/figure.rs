@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 pub struct FigureDetection {
     #[serde(alias = "figure_id", alias = "label", alias = "name", alias = "title")]
     pub figure_number: String,
+    #[serde(default, alias = "figure_caption", alias = "desc", alias = "description")]
+    pub caption: Option<String>,
     #[serde(alias = "box", alias = "bbox", alias = "bounding_box")]
     pub box_2d: BoundingBoxCoords,
 }
@@ -47,9 +49,10 @@ impl BoundingBoxCoords {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CroppedFigure {
     pub figure_label: String,
+    pub caption: Option<String>,
     pub filename: String,
     pub file_path: PathBuf,
 }
@@ -105,12 +108,12 @@ CRITICAL EXTRACTION RULES:
 1. ONLY NON-CONVERTIBLE VISUAL GRAPHICS:
    - Crop ONLY actual visual drawings, charts, schematics, and plots that CANNOT be represented as Markdown text or Markdown tables.
    - STRICTLY FORBIDDEN: NEVER detect or crop text paragraphs, tables of contents, "List of Figures" index pages, bibliographies, or plain textual listings. If a page only contains text or a list of figure titles, return an empty array [].
-2. INCLUDE ONLY THE VISUAL GRAPHIC AND ITS CAPTION:
-   - The bounding box [xmin, ymin, xmax, ymax] MUST enclose the ENTIRE visual graphic CANVAS PLUS its figure title and caption (e.g., "Figure 4.5.—...").
-   - STOP IMMEDIATELY after the figure caption. Do NOT include any body paragraphs, explanatory text, or section headings below or above the caption!
-   - It should include full axis labels, legends, and any figure title text, but exclude any surrounding page body paragraphs, headers, or footers.
+2. INCLUDE BOTH THE GRAPHIC AND THE FULL FIGURE NUMBER AND CAPTION IN THE CROPPED BOX:
+   - The bounding box [xmin, ymin, xmax, ymax] MUST enclose BOTH the visual graphic (plot/drawing/chart) AND its complete figure number and caption (e.g., "Figure 4.5.—Variation of species mole fractions...").
    - ymin MUST be the top of the graphic canvas, top border line, axis labels, or title (whichever is highest).
-   - ymax MUST be the bottom of the caption text line(s). Any normal paragraph text following the caption is regular document text and MUST be excluded.
+   - ymax MUST be the bottom of the figure caption text line(s).
+   - The resulting cropped image MUST contain both the visual graphic and the readable figure number & caption text.
+   - STOP IMMEDIATELY after the figure caption. Do NOT include any body paragraphs, explanatory text, or section headings below or above the caption!
 3. EXACT BOUNDARIES:
    - xmin: Leftmost boundary of the graphic, axes, or title.
    - ymin: Topmost boundary of the graphic canvas, top border line, axis labels, or title (whichever is highest). Do NOT clip the top border line or uppermost curve.
@@ -121,6 +124,7 @@ CRITICAL EXTRACTION RULES:
 [
   {
     "figure_number": "Figure 4.7",
+    "caption": "Variation of species mole fractions with distance for shock tube problem.",
     "box_2d": [xmin, ymin, xmax, ymax]
   }
 ]
@@ -253,6 +257,7 @@ pub fn detect_and_crop_figures(
 
         cropped_figures.push(CroppedFigure {
             figure_label: clean_label,
+            caption: det.caption.clone(),
             filename,
             file_path: figure_path,
         });
@@ -495,56 +500,90 @@ pub fn refine_crop_boundaries(
 
     let min_content_pixels = 2; // Avoid single-pixel noise/scanner artifacts
 
-    // Scan horizontal rows from top down to find start of content
-    let mut content_y1 = None;
+    // Identify continuous content bands and blank gaps in vertical search range
+    #[derive(Debug, Clone, Copy)]
+    struct ContentBand {
+        start: u32,
+        end: u32,
+    }
+
+    let mut bands: Vec<ContentBand> = Vec::new();
+    let mut current_band_start = None;
+    let mut consecutive_blanks = 0u32;
+    // Minimum blank vertical space in rendered pixels separating a figure/caption from body text
+    let blank_gap_threshold = ((search_y2.saturating_sub(search_y1)) as f32 * 0.02).clamp(10.0, 30.0) as u32;
+
     for y in search_y1..search_y2 {
-        let count = (search_x1..search_x2).filter(|&x| is_content(x, y)).take(min_content_pixels).count();
+        let count = (search_x1..search_x2)
+            .filter(|&x| is_content(x, y))
+            .take(min_content_pixels)
+            .count();
         if count >= min_content_pixels {
-            content_y1 = Some(y);
+            if current_band_start.is_none() {
+                current_band_start = Some(y);
+            }
+            consecutive_blanks = 0;
+        } else {
+            consecutive_blanks += 1;
+            if consecutive_blanks >= blank_gap_threshold {
+                if let Some(start) = current_band_start {
+                    let end = y.saturating_sub(consecutive_blanks);
+                    if end >= start {
+                        bands.push(ContentBand { start, end });
+                    }
+                    current_band_start = None;
+                }
+            }
+        }
+    }
+    if let Some(start) = current_band_start {
+        let end = search_y2.saturating_sub(consecutive_blanks);
+        if end >= start {
+            bands.push(ContentBand { start, end });
+        }
+    }
+
+    if bands.is_empty() {
+        return (px_x, px_y, px_w, px_h);
+    }
+
+    // Drop preceding bands caught solely by margin_y expansion:
+    // If a band ends well above px_y (outside the model's detected box), it belongs to
+    // preceding body text above the candidate box.
+    while bands.len() > 1 && bands[0].end <= px_y.saturating_sub(6) {
+        bands.remove(0);
+    }
+
+    // Drop trailing bands caught solely by margin_y expansion:
+    // If a band starts well after px_y + px_h, it belongs to following body text below the candidate box.
+    while bands.len() > 1 && bands.last().unwrap().start >= (px_y + px_h).saturating_add(6) {
+        bands.pop();
+    }
+
+    // Drop trailing body text paragraph:
+    // If the candidate box extended into a multi-line body paragraph beneath the figure/caption
+    // (height >= 100px after substantial content >= 60px), truncate before that trailing paragraph.
+    while bands.len() > 1 {
+        let last_idx = bands.len() - 1;
+        let last_h = bands[last_idx].end.saturating_sub(bands[last_idx].start);
+        let prev_h = bands[last_idx - 1].end.saturating_sub(bands[0].start);
+        if last_h >= 100 && prev_h >= 60 {
+            bands.pop();
+        } else {
             break;
         }
     }
 
-    // Scan horizontal rows from top down to find content and detect any separating blank gap (>= 12 px)
-    // between the figure+caption and any trailing text paragraph accidentally included in the candidate box.
-    let mut last_content_y = content_y1;
-    let mut content_y2 = None;
-    let mut consecutive_blank_rows = 0u32;
-    // Minimum blank vertical space in rendered pixels separating a figure/caption from body text
-    let blank_gap_threshold = ((search_y2.saturating_sub(search_y1)) as f32 * 0.02).clamp(10.0, 30.0) as u32;
-
-    if let Some(start_y) = content_y1 {
-        for y in start_y..search_y2 {
-            let count = (search_x1..search_x2).filter(|&x| is_content(x, y)).take(min_content_pixels).count();
-            if count >= min_content_pixels {
-                // If we previously encountered a wide blank gap after substantial figure content,
-                // and the current line looks like the start of unrelated trailing text (e.g., body paragraph),
-                // stop and keep the figure boundary before the blank gap.
-                if consecutive_blank_rows >= blank_gap_threshold {
-                    // Check if content up to this gap was already substantial (at least 60px height)
-                    if let Some(prev_y) = last_content_y
-                        && prev_y.saturating_sub(start_y) >= 60
-                    {
-                        content_y2 = Some(prev_y);
-                        break;
-                    }
-                }
-                consecutive_blank_rows = 0;
-                last_content_y = Some(y);
-            } else {
-                consecutive_blank_rows += 1;
-            }
-        }
-    }
-
-    if content_y2.is_none() {
-        content_y2 = last_content_y;
-    }
+    let content_y1 = bands[0].start;
+    let content_y2 = bands.last().unwrap().end;
 
     // Scan vertical columns from left to find start of content
     let mut content_x1 = None;
     for x in search_x1..search_x2 {
-        let count = (search_y1..content_y2.unwrap_or(search_y2)).filter(|&y| is_content(x, y)).take(min_content_pixels).count();
+        let count = (content_y1..=content_y2)
+            .filter(|&y| is_content(x, y))
+            .take(min_content_pixels)
+            .count();
         if count >= min_content_pixels {
             content_x1 = Some(x);
             break;
@@ -554,21 +593,24 @@ pub fn refine_crop_boundaries(
     // Scan vertical columns from right to find end of content
     let mut content_x2 = None;
     for x in (search_x1..search_x2).rev() {
-        let count = (search_y1..content_y2.unwrap_or(search_y2)).filter(|&y| is_content(x, y)).take(min_content_pixels).count();
+        let count = (content_y1..=content_y2)
+            .filter(|&y| is_content(x, y))
+            .take(min_content_pixels)
+            .count();
         if count >= min_content_pixels {
             content_x2 = Some(x);
             break;
         }
     }
 
-    match (content_x1, content_y1, content_x2, content_y2) {
-        (Some(cx1), Some(cy1), Some(cx2), Some(cy2)) if cx2 > cx1 && cy2 > cy1 => {
+    match (content_x1, content_x2) {
+        (Some(cx1), Some(cx2)) if cx2 > cx1 && content_y2 > content_y1 => {
             // Add a clean, consistent 14-pixel margin around graphic so top/bottom/side edges are never clipped
             let pad = 14u32;
             let final_x = cx1.saturating_sub(pad);
-            let final_y = cy1.saturating_sub(pad);
+            let final_y = content_y1.saturating_sub(pad);
             let final_x2 = (cx2 + pad + 1).min(img_w);
-            let final_y2 = (cy2 + pad + 1).min(img_h);
+            let final_y2 = (content_y2 + pad + 1).min(img_h);
             let final_w = final_x2.saturating_sub(final_x);
             let final_h = final_y2.saturating_sub(final_y);
 
@@ -687,6 +729,55 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_detection_with_caption() {
+        let json_data = r#"[
+            {
+                "figure_number": "Figure 4.7",
+                "caption": "Variation of species mole fractions with distance.",
+                "box_2d": [10, 20, 100, 200]
+            }
+        ]"#;
+        let res = parse_detection_json(json_data).unwrap();
+        assert_eq!(res.len(), 1);
+        assert_eq!(res[0].figure_number, "Figure 4.7");
+        assert_eq!(
+            res[0].caption.as_deref(),
+            Some("Variation of species mole fractions with distance.")
+        );
+    }
+
+    #[test]
+    fn test_refine_crop_preserves_separated_caption() {
+        use image::{Rgba, RgbaImage};
+
+        // Create a 300x300 white canvas
+        let mut img_buf = RgbaImage::from_pixel(300, 300, Rgba([255, 255, 255, 255]));
+
+        // Block 1: Graphic from y=20..150
+        for y in 20..150 {
+            for x in 30..250 {
+                img_buf.put_pixel(x, y, Rgba([0, 0, 0, 255]));
+            }
+        }
+
+        // Blank vertical gap between graphic and caption: y=150..170 (20px gap)
+
+        // Block 2: Figure caption from y=170..195 (25px height <= 95px)
+        for y in 170..195 {
+            for x in 30..250 {
+                img_buf.put_pixel(x, y, Rgba([0, 0, 0, 255]));
+            }
+        }
+
+        let dyn_img = image::DynamicImage::ImageRgba8(img_buf);
+        let (_rx, ry, _rw, rh) = refine_crop_boundaries(&dyn_img, 10, 10, 260, 220);
+
+        // Refined crop MUST include the caption (bottom should be past 195 + pad)
+        assert_eq!(ry, 6); // 20 - 14pad
+        assert!(ry + rh >= 200, "Refined bottom {} should enclose the caption (>= 200)", ry + rh);
+    }
+
+    #[test]
     fn test_refine_crop_separates_trailing_paragraph_text() {
         use image::{Rgba, RgbaImage};
 
@@ -716,5 +807,77 @@ mod tests {
         assert_eq!(ry, 6); // 20 - 14pad
         assert!(ry + rh <= 170, "Refined bottom {} should be at or before gap (<= 170)", ry + rh);
         assert!(rw >= 200, "Refined width {} should cover the content", rw);
+    }
+
+    #[test]
+    fn test_refine_crop_preserves_multitier_flowchart_and_caption() {
+        use image::{Rgba, RgbaImage};
+
+        // Create a 350x500 white canvas
+        let mut img_buf = RgbaImage::from_pixel(350, 500, Rgba([255, 255, 255, 255]));
+
+        // Preceding paragraph text line: y=15..25 (above candidate box)
+        for y in 15..25 {
+            for x in 30..250 {
+                img_buf.put_pixel(x, y, Rgba([0, 0, 0, 255]));
+            }
+        }
+        // Blank gap from y=25..50
+
+        // Flowchart Tier 1: y=50..110
+        for y in 50..110 {
+            for x in 60..240 {
+                img_buf.put_pixel(x, y, Rgba([0, 0, 0, 255]));
+            }
+        }
+        // Gap y=110..125
+
+        // Flowchart Tier 2: y=125..180
+        for y in 125..180 {
+            for x in 60..240 {
+                img_buf.put_pixel(x, y, Rgba([0, 0, 0, 255]));
+            }
+        }
+        // Gap y=180..195
+
+        // Flowchart Tier 3 (wider): y=195..260, x=30..280
+        for y in 195..260 {
+            for x in 30..280 {
+                img_buf.put_pixel(x, y, Rgba([0, 0, 0, 255]));
+            }
+        }
+        // Gap y=260..275
+
+        // Figure Caption: y=275..295 (height 20px <= 95px)
+        for y in 275..295 {
+            for x in 40..270 {
+                img_buf.put_pixel(x, y, Rgba([0, 0, 0, 255]));
+            }
+        }
+        // Gap y=295..325
+
+        // Trailing body paragraph: y=325..460 (height 135px >= 100px)
+        for y in 325..460 {
+            for x in 30..280 {
+                img_buf.put_pixel(x, y, Rgba([0, 0, 0, 255]));
+            }
+        }
+
+        let dyn_img = image::DynamicImage::ImageRgba8(img_buf);
+        // Candidate box detects the flowchart and caption: px_x=20, px_y=45, px_w=270, px_h=260 (y covers 45..305)
+        let (rx, ry, rw, rh) = refine_crop_boundaries(&dyn_img, 20, 45, 270, 260);
+
+        // 1. Preceding text at y=15..25 must be excluded: ry must start around 50 - 14pad = 36
+        assert!(ry >= 35 && ry <= 40, "ry was {} (expected ~36, excluding preceding text at y=15..25)", ry);
+
+        // 2. Trailing text at y=325..460 must be excluded: bottom must be before y=320
+        assert!(ry + rh <= 320, "Bottom ry+rh was {} (expected <= 320, excluding trailing paragraph at y=325)", ry + rh);
+
+        // 3. Caption at y=275..295 must be INCLUDED: bottom must be after 295 + 14pad = 309
+        assert!(ry + rh >= 305, "Bottom ry+rh was {} (expected >= 305, enclosing caption up to y=295)", ry + rh);
+
+        // 4. Width must cover the widest tier (x=30..280): rx <= 16, rx+rw >= 294
+        assert!(rx <= 20, "rx was {} (expected <= 20 to cover x=30)", rx);
+        assert!(rx + rw >= 290, "Right edge rx+rw was {} (expected >= 290 to cover x=280)", rx + rw);
     }
 }
