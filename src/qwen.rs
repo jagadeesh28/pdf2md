@@ -168,6 +168,22 @@ pub async fn resolve_model_name(client: &reqwest::Client, base_url: &str) -> Str
     "qwen2.5-coder:32b-instruct-q4_K_M".to_string()
 }
 
+pub fn is_ollama_endpoint(url: &str) -> bool {
+    url.contains("11434") || url.ends_with("/api/chat")
+}
+
+pub fn normalize_ollama_chat_url(base_url: &str) -> String {
+    let trimmed = base_url.trim_end_matches('/');
+    if trimmed.ends_with("/api/chat") {
+        trimmed.to_string()
+    } else if trimmed.ends_with("/v1") {
+        let prefix = trimmed.trim_end_matches("/v1");
+        format!("{prefix}/api/chat")
+    } else {
+        format!("{trimmed}/api/chat")
+    }
+}
+
 pub fn ocr_image_file(image_path: &Path) -> Result<String> {
     let bytes = fs::read(image_path).context("failed to read OCR image file")?;
     let image_base64 = STANDARD.encode(&bytes);
@@ -193,6 +209,16 @@ pub fn ocr_image_file(image_path: &Path) -> Result<String> {
             .and_then(|r| r.parse().ok())
             .unwrap_or(1.15);
 
+        let presence_penalty: f32 = std::env::var("QWEN_PRESENCE_PENALTY")
+            .ok()
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(0.1);
+
+        let frequency_penalty: f32 = std::env::var("QWEN_FREQUENCY_PENALTY")
+            .ok()
+            .and_then(|f| f.parse().ok())
+            .unwrap_or(0.1);
+
         let api_key = std::env::var("QWEN_API_KEY").unwrap_or_default();
 
         let stop_tokens = vec![
@@ -200,117 +226,146 @@ pub fn ocr_image_file(image_path: &Path) -> Result<String> {
             "<|endoftext|>".to_string(),
         ];
 
-        let raw_text = if base_url.ends_with("/api/chat") {
-            // Native Ollama chat endpoint
-            let payload = OllamaChatRequest {
-                model: model.clone(),
-                messages: vec![
-                    OllamaMessage {
-                        role: "system".to_string(),
-                        content: DEFAULT_SYSTEM_PROMPT.to_string(),
-                        images: vec![],
-                    },
-                    OllamaMessage {
-                        role: "user".to_string(),
-                        content: DEFAULT_USER_PROMPT.to_string(),
-                        images: vec![image_base64],
-                    },
-                ],
-                stream: false,
-                options: Some(OllamaOptions {
-                    temperature: Some(temperature),
-                    repeat_penalty: Some(repeat_penalty),
-                    repeat_last_n: Some(64),
-                    stop: Some(stop_tokens.clone()),
-                }),
-            };
+        let is_ollama = is_ollama_endpoint(&base_url);
+        let ollama_endpoint = normalize_ollama_chat_url(&base_url);
+        let openai_endpoint = normalize_chat_completions_url(&base_url);
 
-            let mut request = client.post(&base_url).json(&payload);
-            if !api_key.is_empty() {
-                request = request.header("Authorization", format!("Bearer {api_key}"));
-            }
+        let max_retries = 2;
+        let mut cur_repeat_penalty = repeat_penalty;
+        let mut cur_temperature = temperature;
+        let mut cur_repeat_last_n = 64;
+        let mut cur_presence_penalty = presence_penalty;
+        let mut cur_frequency_penalty = frequency_penalty;
 
-            let response = request
-                .send()
-                .await
-                .with_context(|| format!("failed to send request to local Qwen endpoint {base_url} (Make sure your local server is running, e.g. 'ollama serve')"))?;
+        for attempt in 0..=max_retries {
+            let (status, body) = if is_ollama {
+                let payload = OllamaChatRequest {
+                    model: model.clone(),
+                    messages: vec![
+                        OllamaMessage {
+                            role: "system".to_string(),
+                            content: DEFAULT_SYSTEM_PROMPT.to_string(),
+                            images: vec![],
+                        },
+                        OllamaMessage {
+                            role: "user".to_string(),
+                            content: DEFAULT_USER_PROMPT.to_string(),
+                            images: vec![image_base64.clone()],
+                        },
+                    ],
+                    stream: false,
+                    options: Some(OllamaOptions {
+                        temperature: Some(cur_temperature),
+                        repeat_penalty: Some(cur_repeat_penalty),
+                        repeat_last_n: Some(cur_repeat_last_n),
+                        stop: Some(stop_tokens.clone()),
+                    }),
+                };
 
-            let status = response.status();
-            let body = response
-                .text()
-                .await
-                .context("failed to read Qwen response body")?;
+                let mut request = client.post(&ollama_endpoint).json(&payload);
+                if !api_key.is_empty() {
+                    request = request.header("Authorization", format!("Bearer {api_key}"));
+                }
 
-            if !status.is_success() {
-                handle_api_error(status, &body, &model)?;
-            }
+                let response = request
+                    .send()
+                    .await
+                    .with_context(|| format!("failed to send request to local Qwen endpoint {ollama_endpoint} (Make sure your local server is running, e.g. 'ollama serve')"))?;
 
-            let parsed: UnifiedChatResponse = serde_json::from_str(&body)
-                .with_context(|| format!("failed to parse Qwen JSON response: {body}"))?;
-
-            parsed
-                .message
-                .and_then(|m| m.content)
-                .or(parsed.response)
-                .unwrap_or_default()
-        } else {
-            // OpenAI-compatible endpoint (Ollama /v1/chat/completions, vLLM, LMDeploy, etc.)
-            let endpoint = normalize_chat_completions_url(&base_url);
-            let payload = OpenAiChatRequest {
-                model: model.clone(),
-                messages: vec![
-                    OpenAiMessage {
-                        role: "system".to_string(),
-                        content: MessageContent::Text(DEFAULT_SYSTEM_PROMPT.to_string()),
-                    },
-                    OpenAiMessage {
-                        role: "user".to_string(),
-                        content: MessageContent::Parts(vec![
-                            ContentPart::Text {
-                                text: DEFAULT_USER_PROMPT.to_string(),
-                            },
-                            ContentPart::ImageUrl {
-                                image_url: ImageUrlObject {
-                                    url: format!("data:image/png;base64,{image_base64}"),
+                let status = response.status();
+                let body = response
+                    .text()
+                    .await
+                    .context("failed to read Qwen response body")?;
+                (status, body)
+            } else {
+                let payload = OpenAiChatRequest {
+                    model: model.clone(),
+                    messages: vec![
+                        OpenAiMessage {
+                            role: "system".to_string(),
+                            content: MessageContent::Text(DEFAULT_SYSTEM_PROMPT.to_string()),
+                        },
+                        OpenAiMessage {
+                            role: "user".to_string(),
+                            content: MessageContent::Parts(vec![
+                                ContentPart::Text {
+                                    text: DEFAULT_USER_PROMPT.to_string(),
                                 },
-                            },
-                        ]),
-                    },
-                ],
-                temperature: Some(temperature),
-                presence_penalty: Some(0.1),
-                frequency_penalty: Some(0.1),
-                stop: Some(stop_tokens),
+                                ContentPart::ImageUrl {
+                                    image_url: ImageUrlObject {
+                                        url: format!("data:image/png;base64,{image_base64}"),
+                                    },
+                                },
+                            ]),
+                        },
+                    ],
+                    temperature: Some(cur_temperature),
+                    presence_penalty: Some(cur_presence_penalty),
+                    frequency_penalty: Some(cur_frequency_penalty),
+                    stop: Some(stop_tokens.clone()),
+                };
+
+                let mut request = client.post(&openai_endpoint).json(&payload);
+                if !api_key.is_empty() {
+                    request = request.header("Authorization", format!("Bearer {api_key}"));
+                }
+
+                let response = request
+                    .send()
+                    .await
+                    .with_context(|| format!("failed to send request to local Qwen endpoint {openai_endpoint} (Make sure your local server is running, e.g. 'ollama serve' or vLLM)"))?;
+
+                let status = response.status();
+                let body = response
+                    .text()
+                    .await
+                    .context("failed to read Qwen response body")?;
+                (status, body)
             };
 
-            let mut request = client.post(&endpoint).json(&payload);
-            if !api_key.is_empty() {
-                request = request.header("Authorization", format!("Bearer {api_key}"));
-            }
-
-            let response = request
-                .send()
-                .await
-                .with_context(|| format!("failed to send request to local Qwen endpoint {endpoint} (Make sure your local server is running, e.g. 'ollama serve' or vLLM)"))?;
-
-            let status = response.status();
-            let body = response
-                .text()
-                .await
-                .context("failed to read Qwen response body")?;
-
             if !status.is_success() {
+                if body.contains("token repeat limit reached") {
+                    if attempt < max_retries {
+                        cur_repeat_penalty = if attempt == 0 {
+                            cur_repeat_penalty.max(1.3)
+                        } else {
+                            cur_repeat_penalty.max(1.5)
+                        };
+                        cur_temperature = (cur_temperature + 0.2).min(0.7);
+                        cur_repeat_last_n = if attempt == 0 { 128 } else { 256 };
+                        cur_presence_penalty = (cur_presence_penalty + 0.3).min(1.5);
+                        cur_frequency_penalty = (cur_frequency_penalty + 0.3).min(1.5);
+                        eprintln!(
+                            "Notice: Local model '{model}' entered a repetitive token loop (attempt {}/{}). Retrying with repeat_penalty={:.2}, temperature={:.2}...",
+                            attempt + 1,
+                            max_retries + 1,
+                            cur_repeat_penalty,
+                            cur_temperature
+                        );
+                        continue;
+                    }
+                }
                 handle_api_error(status, &body, &model)?;
             }
 
             let parsed: UnifiedChatResponse = serde_json::from_str(&body)
                 .with_context(|| format!("failed to parse Qwen JSON response: {body}"))?;
 
-            extract_content_from_response(&parsed)
-                .unwrap_or_else(|| body.clone())
-        };
+            let raw_text = if is_ollama {
+                parsed
+                    .message
+                    .and_then(|m| m.content)
+                    .or(parsed.response)
+                    .unwrap_or_default()
+            } else {
+                extract_content_from_response(&parsed).unwrap_or_else(|| body.clone())
+            };
 
-        Ok(clean_model_markdown(&raw_text))
+            return Ok(clean_model_markdown(&raw_text));
+        }
+
+        bail!("Local model '{model}' entered a repetitive token loop and could not recover after {} retries.", max_retries)
     })
 }
 
@@ -328,39 +383,84 @@ pub fn transcribe_text(text: &str) -> Result<String> {
         let model = resolve_model_name(&client, &base_url).await;
         let api_key = std::env::var("QWEN_API_KEY").unwrap_or_default();
 
-        let endpoint = normalize_chat_completions_url(&base_url);
-        let payload = OpenAiChatRequest {
-            model: model.clone(),
-            messages: vec![
-                OpenAiMessage {
-                    role: "system".to_string(),
-                    content: MessageContent::Text(DEFAULT_TEXT_SYSTEM_PROMPT.to_string()),
-                },
-                OpenAiMessage {
-                    role: "user".to_string(),
-                    content: MessageContent::Text(format!(
-                        "Reformat and transcribe the following document text into Obsidian Markdown:\n\n{text}"
-                    )),
-                },
-            ],
-            temperature: Some(0.1),
-            presence_penalty: Some(0.1),
-            frequency_penalty: Some(0.1),
-            stop: None,
+        let is_ollama = is_ollama_endpoint(&base_url);
+        let ollama_endpoint = normalize_ollama_chat_url(&base_url);
+        let openai_endpoint = normalize_chat_completions_url(&base_url);
+
+        let (status, body) = if is_ollama {
+            let payload = OllamaChatRequest {
+                model: model.clone(),
+                messages: vec![
+                    OllamaMessage {
+                        role: "system".to_string(),
+                        content: DEFAULT_TEXT_SYSTEM_PROMPT.to_string(),
+                        images: vec![],
+                    },
+                    OllamaMessage {
+                        role: "user".to_string(),
+                        content: format!(
+                            "Reformat and transcribe the following document text into Obsidian Markdown:\n\n{text}"
+                        ),
+                        images: vec![],
+                    },
+                ],
+                stream: false,
+                options: Some(OllamaOptions {
+                    temperature: Some(0.1),
+                    repeat_penalty: Some(1.2),
+                    repeat_last_n: Some(64),
+                    stop: None,
+                }),
+            };
+
+            let mut request = client.post(&ollama_endpoint).json(&payload);
+            if !api_key.is_empty() {
+                request = request.header("Authorization", format!("Bearer {api_key}"));
+            }
+
+            let response = request
+                .send()
+                .await
+                .with_context(|| format!("failed to send text request to Qwen endpoint {ollama_endpoint}"))?;
+
+            let status = response.status();
+            let body = response.text().await.context("failed to read response body")?;
+            (status, body)
+        } else {
+            let payload = OpenAiChatRequest {
+                model: model.clone(),
+                messages: vec![
+                    OpenAiMessage {
+                        role: "system".to_string(),
+                        content: MessageContent::Text(DEFAULT_TEXT_SYSTEM_PROMPT.to_string()),
+                    },
+                    OpenAiMessage {
+                        role: "user".to_string(),
+                        content: MessageContent::Text(format!(
+                            "Reformat and transcribe the following document text into Obsidian Markdown:\n\n{text}"
+                        )),
+                    },
+                ],
+                temperature: Some(0.1),
+                presence_penalty: Some(0.1),
+                frequency_penalty: Some(0.1),
+                stop: None,
+            };
+
+            let mut request = client.post(&openai_endpoint).json(&payload);
+            if !api_key.is_empty() {
+                request = request.header("Authorization", format!("Bearer {api_key}"));
+            }
+
+            let response = request
+                .send()
+                .await
+                .with_context(|| format!("failed to send text request to Qwen endpoint {openai_endpoint}"))?;
+
+            let status = response.status();
+            let body = response.text().await.context("failed to read response body")?;
+            (status, body)
         };
-
-        let mut request = client.post(&endpoint).json(&payload);
-        if !api_key.is_empty() {
-            request = request.header("Authorization", format!("Bearer {api_key}"));
-        }
-
-        let response = request
-            .send()
-            .await
-            .with_context(|| format!("failed to send text request to Qwen endpoint {endpoint}"))?;
-
-        let status = response.status();
-        let body = response.text().await.context("failed to read response body")?;
 
         if !status.is_success() {
             handle_api_error(status, &body, &model)?;
@@ -471,6 +571,27 @@ mod tests {
         assert_eq!(
             normalize_chat_completions_url("http://localhost:8000/v1/chat/completions/"),
             "http://localhost:8000/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn test_ollama_endpoint_detection_and_url() {
+        assert!(is_ollama_endpoint("http://localhost:11434"));
+        assert!(is_ollama_endpoint("http://localhost:11434/v1"));
+        assert!(is_ollama_endpoint("http://127.0.0.1:11434/api/chat"));
+        assert!(!is_ollama_endpoint("http://localhost:8000/v1"));
+
+        assert_eq!(
+            normalize_ollama_chat_url("http://localhost:11434"),
+            "http://localhost:11434/api/chat"
+        );
+        assert_eq!(
+            normalize_ollama_chat_url("http://localhost:11434/v1"),
+            "http://localhost:11434/api/chat"
+        );
+        assert_eq!(
+            normalize_ollama_chat_url("http://localhost:11434/api/chat"),
+            "http://localhost:11434/api/chat"
         );
     }
 

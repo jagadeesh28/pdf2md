@@ -399,6 +399,26 @@ fn process_single_page(
                     } else {
                         return Err(err);
                     }
+                } else if err_msg.contains("token repeat limit reached")
+                    || err_msg.contains("repetitive token loop")
+                {
+                    if let Some(txt) = raw_page_text {
+                        eprintln!(
+                            "Notice: Page {page_num} vision OCR entered a repetitive token loop; formatting extracted PDF text into Markdown..."
+                        );
+                        match qwen::transcribe_text(txt) {
+                            Ok(formatted) => formatted,
+                            Err(_) => txt.to_string(),
+                        }
+                    } else {
+                        eprintln!(
+                            "Warning: Page {page_num} vision OCR entered a repetitive token loop and no raw text was available in the PDF. Emitting placeholder note so document conversion continues."
+                        );
+                        format!(
+                            "> [!WARNING] Page {page_num} Transcription Incomplete\n\
+                             > Local vision model entered a repetitive token loop on this page and generation was stopped by Ollama.\n"
+                        )
+                    }
                 } else {
                     return Err(err);
                 }

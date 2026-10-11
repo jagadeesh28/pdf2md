@@ -108,6 +108,8 @@ CRITICAL EXTRACTION RULES:
 2. INCLUDE ONLY THE VISUAL GRAPHIC AND ITS CAPTION:
    - The bounding box [xmin, ymin, xmax, ymax] MUST enclose the ENTIRE visual graphic CANVAS PLUS its figure title and caption (e.g., "Figure 4.5.—...").
    - STOP IMMEDIATELY after the figure caption. Do NOT include any body paragraphs, explanatory text, or section headings below or above the caption!
+   - It should include full axis labels, legends, and any figure title text, but exclude any surrounding page body paragraphs, headers, or footers.
+   - ymin MUST be the top of the graphic canvas, top border line, axis labels, or title (whichever is highest).
    - ymax MUST be the bottom of the caption text line(s). Any normal paragraph text following the caption is regular document text and MUST be excluded.
 3. EXACT BOUNDARIES:
    - xmin: Leftmost boundary of the graphic, axes, or title.
