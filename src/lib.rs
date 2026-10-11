@@ -1,4 +1,5 @@
 pub mod fallback;
+pub mod figure;
 pub mod gemini;
 pub mod gemma;
 pub mod qwen;
@@ -52,6 +53,7 @@ pub fn resolve_default_backend() -> OcrBackend {
 pub struct PdfExtractionResult {
     pub text: String,
     pub images: Vec<PathBuf>,
+    pub figures: Vec<figure::CroppedFigure>,
 }
 
 #[derive(Debug, Default)]
@@ -95,14 +97,17 @@ pub fn process_pdf_with_backend(
         begin_page,
         end_page,
         backend,
-        |text, image| {
+        |text, figures| {
             if !text.trim().is_empty() {
                 extracted.text.push_str(&text);
                 if !extracted.text.ends_with("\n\n") {
                     extracted.text.push_str("\n\n");
                 }
             }
-            extracted.images.push(image);
+            for fig in figures {
+                extracted.images.push(fig.file_path.clone());
+                extracted.figures.push(fig);
+            }
 
             fs::write(output_path, render_markdown(&extracted)).with_context(|| {
                 format!(
@@ -155,6 +160,7 @@ pub fn extract_pdf_text(
     Ok(PdfExtractionResult {
         text: cleaned,
         images: Vec::new(),
+        figures: Vec::new(),
     })
 }
 
@@ -187,12 +193,15 @@ pub fn fall_back_to_ocr_with_backend(
         begin_page,
         end_page,
         backend,
-        |text, image| {
+        |text, figures| {
             if !text.trim().is_empty() {
                 result.text.push_str(&text);
                 result.text.push_str("\n\n");
             }
-            result.images.push(image);
+            for fig in figures {
+                result.images.push(fig.file_path.clone());
+                result.figures.push(fig);
+            }
             Ok(())
         },
     )?;
@@ -208,7 +217,7 @@ pub fn process_ocr_pages<F>(
     on_page: F,
 ) -> Result<()>
 where
-    F: FnMut(String, PathBuf) -> Result<()>,
+    F: FnMut(String, Vec<figure::CroppedFigure>) -> Result<()>,
 {
     process_ocr_pages_with_backend(
         input_path,
@@ -229,7 +238,7 @@ pub fn process_ocr_pages_with_backend<F>(
     mut on_page: F,
 ) -> Result<()>
 where
-    F: FnMut(String, PathBuf) -> Result<()>,
+    F: FnMut(String, Vec<figure::CroppedFigure>) -> Result<()>,
 {
     validate_page_range(begin_page, end_page)?;
 
@@ -300,18 +309,14 @@ where
             }
         };
 
-        let file_name = image_path.file_name().with_context(|| {
-            format!("OCR image path has no file name: {}", image_path.display())
-        })?;
-        let destination = image_output_dir.join(file_name);
-        fs::copy(&image_path, &destination).with_context(|| {
-            format!(
-                "failed to copy OCR image {} to {}",
-                image_path.display(),
-                destination.display()
-            )
-        })?;
-        on_page(ocr_text, destination)?;
+        // Detect and crop figures on this page using Qwen Vision into image_output_dir
+        let cropped_figures = figure::detect_and_crop_figures(&image_path, image_output_dir, page_num)
+            .unwrap_or_else(|err| {
+                eprintln!("Figure detection skipped for page {page_num}: {err:#}");
+                Vec::new()
+            });
+
+        on_page(ocr_text, cropped_figures)?;
     }
 
     Ok(())
@@ -331,7 +336,18 @@ pub fn render_markdown(result: &PdfExtractionResult) -> String {
         output.push_str("\n\n");
     }
 
-    if !result.images.is_empty() {
+    if !result.figures.is_empty() {
+        if !output.is_empty() {
+            output.push('\n');
+        }
+        output.push_str("## Figures\n\n");
+        for fig in &result.figures {
+            output.push_str(&format!(
+                "![{}](images/{})\n*{}*\n\n",
+                fig.figure_label, fig.filename, fig.figure_label
+            ));
+        }
+    } else if !result.images.is_empty() {
         if !output.is_empty() {
             output.push('\n');
         }
@@ -370,6 +386,7 @@ mod tests {
         let result = PdfExtractionResult {
             text: "Hello world\nThis is a test PDF\n".to_string(),
             images: vec![],
+            figures: vec![],
         };
 
         let output = render_markdown(&result);
@@ -383,6 +400,7 @@ mod tests {
         let result = PdfExtractionResult {
             text: "Page one\n".to_string(),
             images: vec![std::path::PathBuf::from("assets/page-1.png")],
+            figures: vec![],
         };
 
         let output = render_markdown(&result);
@@ -395,6 +413,7 @@ mod tests {
         let result = PdfExtractionResult {
             text: String::new(),
             images: vec![std::path::PathBuf::from("assets/page-1.png")],
+            figures: vec![],
         };
 
         let output = render_markdown(&result);
@@ -433,5 +452,25 @@ mod tests {
     fn default_backend_is_qwen() {
         use super::OcrBackend;
         assert_eq!(OcrBackend::default(), OcrBackend::Qwen);
+    }
+
+    #[test]
+    fn renders_figures_with_exact_labels() {
+        let result = PdfExtractionResult {
+            text: "# Section\nSome text".to_string(),
+            images: vec![],
+            figures: vec![
+                super::figure::CroppedFigure {
+                    figure_label: "Figure VII-3".to_string(),
+                    filename: "Figure-VII-3.png".to_string(),
+                    file_path: std::path::PathBuf::from("output/images/Figure-VII-3.png"),
+                },
+            ],
+        };
+
+        let output = render_markdown(&result);
+        assert!(output.contains("## Figures"));
+        assert!(output.contains("![Figure VII-3](images/Figure-VII-3.png)"));
+        assert!(output.contains("*Figure VII-3*"));
     }
 }
