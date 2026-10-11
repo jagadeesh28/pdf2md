@@ -1,6 +1,5 @@
 target/
 images/
-*.md
-!PDF2MD_WORKFLOW_GUIDE.md
+output/
 *.pdf
 Cargo.lock
