@@ -105,14 +105,15 @@ CRITICAL EXTRACTION RULES:
 1. ONLY NON-CONVERTIBLE VISUAL GRAPHICS:
    - Crop ONLY actual visual drawings, charts, schematics, and plots that CANNOT be represented as Markdown text or Markdown tables.
    - STRICTLY FORBIDDEN: NEVER detect or crop text paragraphs, tables of contents, "List of Figures" index pages, bibliographies, or plain textual listings. If a page only contains text or a list of figure titles, return an empty array [].
-2. INCLUDE THE FULL FIGURE TITLE AND CAPTION:
-   - The bounding box [xmin, ymin, xmax, ymax] MUST enclose the ENTIRE visual graphic CANVAS PLUS its full figure title and caption (whether located immediately below, above, or beside the graphic).
-   - Do NOT cut off the figure title/label (e.g. "Figure 4.7.—Variation of species...").
+2. INCLUDE ONLY THE VISUAL GRAPHIC AND ITS CAPTION:
+   - The bounding box [xmin, ymin, xmax, ymax] MUST enclose the ENTIRE visual graphic CANVAS PLUS its figure title and caption (e.g., "Figure 4.5.—...").
+   - STOP IMMEDIATELY after the figure caption. Do NOT include any body paragraphs, explanatory text, or section headings below or above the caption!
+   - ymax MUST be the bottom of the caption text line(s). Any normal paragraph text following the caption is regular document text and MUST be excluded.
 3. EXACT BOUNDARIES:
    - xmin: Leftmost boundary of the graphic, axes, or title.
    - ymin: Topmost boundary of the graphic or its title (whichever is higher).
    - xmax: Rightmost boundary of the graphic, legend, or caption.
-   - ymax: Bottommost boundary of the graphic or its caption (whichever is lower).
+   - ymax: Bottommost baseline of the figure caption. STRICTLY exclude body paragraphs beneath it.
    - Do NOT include surrounding page body paragraphs, page headers, or page footers.
 4. Output format: Return ONLY a valid JSON array of objects in this exact schema:
 [
@@ -501,20 +502,46 @@ pub fn refine_crop_boundaries(
         }
     }
 
-    // Scan horizontal rows from bottom to find end of content
+    // Scan horizontal rows from top down to find content and detect any separating blank gap (>= 12 px)
+    // between the figure+caption and any trailing text paragraph accidentally included in the candidate box.
+    let mut last_content_y = content_y1;
     let mut content_y2 = None;
-    for y in (search_y1..search_y2).rev() {
-        let count = (search_x1..search_x2).filter(|&x| is_content(x, y)).take(min_content_pixels).count();
-        if count >= min_content_pixels {
-            content_y2 = Some(y);
-            break;
+    let mut consecutive_blank_rows = 0u32;
+    // Minimum blank vertical space in rendered pixels separating a figure/caption from body text
+    let blank_gap_threshold = ((search_y2.saturating_sub(search_y1)) as f32 * 0.02).clamp(10.0, 30.0) as u32;
+
+    if let Some(start_y) = content_y1 {
+        for y in start_y..search_y2 {
+            let count = (search_x1..search_x2).filter(|&x| is_content(x, y)).take(min_content_pixels).count();
+            if count >= min_content_pixels {
+                // If we previously encountered a wide blank gap after substantial figure content,
+                // and the current line looks like the start of unrelated trailing text (e.g., body paragraph),
+                // stop and keep the figure boundary before the blank gap.
+                if consecutive_blank_rows >= blank_gap_threshold {
+                    // Check if content up to this gap was already substantial (at least 60px height)
+                    if let Some(prev_y) = last_content_y
+                        && prev_y.saturating_sub(start_y) >= 60
+                    {
+                        content_y2 = Some(prev_y);
+                        break;
+                    }
+                }
+                consecutive_blank_rows = 0;
+                last_content_y = Some(y);
+            } else {
+                consecutive_blank_rows += 1;
+            }
         }
+    }
+
+    if content_y2.is_none() {
+        content_y2 = last_content_y;
     }
 
     // Scan vertical columns from left to find start of content
     let mut content_x1 = None;
     for x in search_x1..search_x2 {
-        let count = (search_y1..search_y2).filter(|&y| is_content(x, y)).take(min_content_pixels).count();
+        let count = (search_y1..content_y2.unwrap_or(search_y2)).filter(|&y| is_content(x, y)).take(min_content_pixels).count();
         if count >= min_content_pixels {
             content_x1 = Some(x);
             break;
@@ -524,7 +551,7 @@ pub fn refine_crop_boundaries(
     // Scan vertical columns from right to find end of content
     let mut content_x2 = None;
     for x in (search_x1..search_x2).rev() {
-        let count = (search_y1..search_y2).filter(|&y| is_content(x, y)).take(min_content_pixels).count();
+        let count = (search_y1..content_y2.unwrap_or(search_y2)).filter(|&y| is_content(x, y)).take(min_content_pixels).count();
         if count >= min_content_pixels {
             content_x2 = Some(x);
             break;
@@ -654,5 +681,37 @@ mod tests {
         assert_eq!(ry, 52);
         assert_eq!(rw, 96);
         assert_eq!(rh, 86);
+    }
+
+    #[test]
+    fn test_refine_crop_separates_trailing_paragraph_text() {
+        use image::{Rgba, RgbaImage};
+
+        // Create a 300x400 white canvas
+        let mut img_buf = RgbaImage::from_pixel(300, 400, Rgba([255, 255, 255, 255]));
+
+        // Block 1: Graphic + caption from y=20..150
+        for y in 20..150 {
+            for x in 30..250 {
+                img_buf.put_pixel(x, y, Rgba([0, 0, 0, 255]));
+            }
+        }
+
+        // Blank vertical gap from y=150..180 (30px gap > blank_gap_threshold)
+
+        // Block 2: Trailing body paragraph from y=180..320
+        for y in 180..320 {
+            for x in 30..250 {
+                img_buf.put_pixel(x, y, Rgba([0, 0, 0, 255]));
+            }
+        }
+
+        let dyn_img = image::DynamicImage::ImageRgba8(img_buf);
+        let (_rx, ry, rw, rh) = refine_crop_boundaries(&dyn_img, 10, 10, 260, 350);
+
+        // The refinement must detect the blank gap after y=150 and truncate before the trailing paragraph
+        assert_eq!(ry, 12); // 20 - 8pad
+        assert!(ry + rh <= 160, "Refined bottom {} should be at or before gap (<= 160)", ry + rh);
+        assert!(rw >= 200, "Refined width {} should cover the content", rw);
     }
 }
