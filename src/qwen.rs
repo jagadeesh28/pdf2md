@@ -119,11 +119,10 @@ Adhere strictly to these formatting rules:
 5. Clean up OCR/extraction artifacts and fix line breaks mid-sentence to restore natural reading flow."#;
 
 pub async fn resolve_model_name(client: &reqwest::Client, base_url: &str) -> String {
-    if let Ok(model) = std::env::var("QWEN_MODEL") {
-        if !model.trim().is_empty() {
+    if let Ok(model) = std::env::var("QWEN_MODEL")
+        && !model.trim().is_empty() {
             return model;
         }
-    }
 
     // Try detecting installed models from Ollama /api/tags
     let tags_url = if let Ok(mut parsed) = reqwest::Url::parse(base_url) {
@@ -133,9 +132,9 @@ pub async fn resolve_model_name(client: &reqwest::Client, base_url: &str) -> Str
         "http://localhost:11434/api/tags".to_string()
     };
 
-    if let Ok(resp) = client.get(&tags_url).send().await {
-        if let Ok(body) = resp.text().await {
-            if let Ok(parsed) = serde_json::from_str::<OllamaTagsResponse>(&body) {
+    if let Ok(resp) = client.get(&tags_url).send().await
+        && let Ok(body) = resp.text().await
+            && let Ok(parsed) = serde_json::from_str::<OllamaTagsResponse>(&body) {
                 // If a multimodal / vision model is present, prefer it for OCR
                 if let Some(m) = parsed.models.iter().find(|m| {
                     let name = m.name.to_lowercase();
@@ -151,8 +150,6 @@ pub async fn resolve_model_name(client: &reqwest::Client, base_url: &str) -> Str
                     return m.name.clone();
                 }
             }
-        }
-    }
 
     "qwen2.5-coder:32b-instruct-q4_K_M".to_string()
 }
@@ -372,20 +369,18 @@ fn normalize_chat_completions_url(base_url: &str) -> String {
 
 fn extract_content_from_response(parsed: &UnifiedChatResponse) -> Option<String> {
     if let Some(choice) = parsed.choices.first() {
-        if let Some(message) = &choice.message {
-            if let Some(content) = &message.content {
+        if let Some(message) = &choice.message
+            && let Some(content) = &message.content {
                 return Some(content.clone());
             }
-        }
         if let Some(text) = &choice.text {
             return Some(text.clone());
         }
     }
-    if let Some(message) = &parsed.message {
-        if let Some(content) = &message.content {
+    if let Some(message) = &parsed.message
+        && let Some(content) = &message.content {
             return Some(content.clone());
         }
-    }
     parsed.response.clone()
 }
 
@@ -393,12 +388,11 @@ pub fn clean_model_markdown(raw_text: &str) -> String {
     let mut text = raw_text.to_string();
 
     // Strip <think>...</think> if reasoning thoughts are present
-    if let Some(start) = text.find("<think>") {
-        if let Some(end) = text.find("</think>") {
+    if let Some(start) = text.find("<think>")
+        && let Some(end) = text.find("</think>") {
             let after_end = end + "</think>".len();
             text = format!("{}{}", &text[..start], &text[after_end..]);
         }
-    }
 
     let trimmed = text.trim();
     if (trimmed.starts_with("```markdown") || trimmed.starts_with("```")) && trimmed.ends_with("```")
