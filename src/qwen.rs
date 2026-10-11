@@ -8,7 +8,14 @@ use std::path::Path;
 struct OpenAiChatRequest {
     model: String,
     messages: Vec<OpenAiMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    presence_penalty: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    frequency_penalty: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stop: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -57,7 +64,14 @@ struct OllamaMessage {
 
 #[derive(Debug, Serialize)]
 struct OllamaOptions {
+    #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repeat_penalty: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repeat_last_n: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stop: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -169,7 +183,22 @@ pub fn ocr_image_file(image_path: &Path) -> Result<String> {
 
         let client = reqwest::Client::new();
         let model = resolve_model_name(&client, &base_url).await;
+        let temperature: f32 = std::env::var("QWEN_TEMPERATURE")
+            .ok()
+            .and_then(|t| t.parse().ok())
+            .unwrap_or(0.1);
+
+        let repeat_penalty: f32 = std::env::var("QWEN_REPEAT_PENALTY")
+            .ok()
+            .and_then(|r| r.parse().ok())
+            .unwrap_or(1.15);
+
         let api_key = std::env::var("QWEN_API_KEY").unwrap_or_default();
+
+        let stop_tokens = vec![
+            "<|im_end|>".to_string(),
+            "<|endoftext|>".to_string(),
+        ];
 
         let raw_text = if base_url.ends_with("/api/chat") {
             // Native Ollama chat endpoint
@@ -189,7 +218,10 @@ pub fn ocr_image_file(image_path: &Path) -> Result<String> {
                 ],
                 stream: false,
                 options: Some(OllamaOptions {
-                    temperature: Some(0.0),
+                    temperature: Some(temperature),
+                    repeat_penalty: Some(repeat_penalty),
+                    repeat_last_n: Some(64),
+                    stop: Some(stop_tokens.clone()),
                 }),
             };
 
@@ -245,7 +277,10 @@ pub fn ocr_image_file(image_path: &Path) -> Result<String> {
                         ]),
                     },
                 ],
-                temperature: Some(0.0),
+                temperature: Some(temperature),
+                presence_penalty: Some(0.1),
+                frequency_penalty: Some(0.1),
+                stop: Some(stop_tokens),
             };
 
             let mut request = client.post(&endpoint).json(&payload);
@@ -308,7 +343,10 @@ pub fn transcribe_text(text: &str) -> Result<String> {
                     )),
                 },
             ],
-            temperature: Some(0.0),
+            temperature: Some(0.1),
+            presence_penalty: Some(0.1),
+            frequency_penalty: Some(0.1),
+            stop: None,
         };
 
         let mut request = client.post(&endpoint).json(&payload);
@@ -351,6 +389,14 @@ fn handle_api_error(status: reqwest::StatusCode, body: &str, model: &str) -> Res
         bail!(
             "Model '{model}' was not found in Ollama.\n\
              Run 'ollama list' to check installed models, or set QWEN_MODEL (e.g. export QWEN_MODEL=qwen2.5-coder:32b-instruct-q4_K_M)."
+        );
+    }
+    if body.contains("token repeat limit reached") {
+        bail!(
+            "Local model '{model}' entered a repetitive token loop and was stopped by Ollama (token repeat limit reached).\n\
+             This can happen on complex pages with repeated borders or dense symbols.\n\
+             Try adjusting repeat penalty (e.g. export QWEN_REPEAT_PENALTY=1.2) or use Gemini/Gemma for this document:\n  \
+             cargo run --release -- <input.pdf> <output.md> <start> <end> gemini"
         );
     }
     bail!("Local Qwen endpoint returned HTTP {status}: {body}");
