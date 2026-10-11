@@ -101,8 +101,14 @@ struct ChatMessage {
     content: Option<String>,
 }
 
-const FIGURE_DETECTION_PROMPT: &str = r#"You are an expert document vision analyzer.
+fn figure_detection_prompt(img_w: u32, img_h: u32) -> String {
+    format!(
+r#"You are an expert document vision analyzer.
 Your task is to detect ONLY actual, non-convertible visual figures and graphics on this page (such as plots, charts, graphs, flowcharts, schematics, engineering drawings, diagrams, and photos).
+
+IMAGE CANVAS DIMENSIONS:
+- Width: {img_w} pixels
+- Height: {img_h} pixels
 
 CRITICAL EXTRACTION RULES:
 1. ONLY NON-CONVERTIBLE VISUAL GRAPHICS:
@@ -110,27 +116,29 @@ CRITICAL EXTRACTION RULES:
    - STRICTLY FORBIDDEN: NEVER detect or crop text paragraphs, tables of contents, "List of Figures" index pages, bibliographies, or plain textual listings. If a page only contains text or a list of figure titles, return an empty array [].
 2. INCLUDE BOTH THE GRAPHIC AND THE FULL FIGURE NUMBER AND CAPTION IN THE CROPPED BOX:
    - The bounding box [xmin, ymin, xmax, ymax] MUST enclose BOTH the visual graphic (plot/drawing/chart) AND its complete figure number and caption (e.g., "Figure 4.5.—Variation of species mole fractions...").
-   - ymin MUST be the top of the graphic canvas, top border line, axis labels, or title (whichever is highest).
-   - ymax MUST be the bottom of the figure caption text line(s).
+   - ymin MUST enclose the uppermost part: if the caption/title is at the top above the graphic, ymin MUST be the top of the caption/title; if the graphic is at the top, ymin MUST be the top of the graphic canvas, top border line, axis labels, or curve peaks. Do NOT clip the top border line, curve peaks, or top labels.
+   - ymax MUST enclose the lowermost part: if the caption is at the bottom, ymax MUST be below the last line of the figure caption text; if the graphic extends lower, ymax MUST be the bottom of the graphic.
    - The resulting cropped image MUST contain both the visual graphic and the readable figure number & caption text.
-   - STOP IMMEDIATELY after the figure caption. Do NOT include any body paragraphs, explanatory text, or section headings below or above the caption!
+   - STOP IMMEDIATELY after the figure caption. Do NOT include any body paragraphs, explanatory text, or section headings below or above the figure!
 3. EXACT BOUNDARIES:
-   - xmin: Leftmost boundary of the graphic, axes, or title.
-   - ymin: Topmost boundary of the graphic canvas, top border line, axis labels, or title (whichever is highest). Do NOT clip the top border line or uppermost curve.
+   - xmin: Leftmost boundary of the graphic, axes, or caption.
+   - ymin: Topmost boundary of the graphic canvas, top border line, axis labels, or caption/title (whichever is highest).
    - xmax: Rightmost boundary of the graphic, legend, or caption.
-   - ymax: Bottommost baseline of the figure caption. STRICTLY exclude body paragraphs beneath it.
-   - Do NOT include surrounding page body paragraphs, page headers, or page footers.
+   - ymax: Bottommost baseline of the figure or caption (whichever is lowest). STRICTLY exclude body paragraphs beneath or above it.
+   - In multi-column layouts, do NOT bleed into adjacent text columns.
 4. Output format: Return ONLY a valid JSON array of objects in this exact schema:
 [
-  {
+  {{
     "figure_number": "Figure 4.7",
     "caption": "Variation of species mole fractions with distance for shock tube problem.",
     "box_2d": [xmin, ymin, xmax, ymax]
-  }
+  }}
 ]
-- Coordinates: [xmin, ymin, xmax, ymax] (0,0 is top-left).
+- Coordinates: Provide exact pixel integer coordinates [xmin, ymin, xmax, ymax] on the {img_w}x{img_h} canvas (0,0 is top-left, xmax <= {img_w}, ymax <= {img_h}).
 - If no actual visual drawings, plots, or diagrams exist on this page, return []
-- Return ONLY raw JSON without markdown fences or commentary."#;
+- Return ONLY raw JSON without markdown fences or commentary."#
+    )
+}
 
 /// Detects figures on a document page image using Qwen Vision, refines boundaries tightly,
 /// and crops each into output_dir without overwriting existing files.
@@ -153,7 +161,9 @@ pub fn detect_and_crop_figures(
         )
     })?;
 
-    let detections = match detect_figures_with_qwen(page_image_path) {
+    let (img_w, img_h) = img.dimensions();
+
+    let detections = match detect_figures_with_qwen(page_image_path, img_w, img_h) {
         Ok(dets) => dets,
         Err(err) => {
             eprintln!(
@@ -165,7 +175,6 @@ pub fn detect_and_crop_figures(
     };
 
     let mut cropped_figures = Vec::new();
-    let (img_w, img_h) = img.dimensions();
 
     for (idx, det) in detections.into_iter().enumerate() {
         let (mut xmin, mut ymin, mut xmax, mut ymax) = match det.box_2d.to_coords() {
@@ -183,38 +192,19 @@ pub fn detect_and_crop_figures(
 
         // Determine coordinate scale:
         // - 0.0..1.0 normalized
-        // - 0..1000 standard Qwen-VL normalized
-        // - Direct pixel coordinates if greater than 1000
+        // - Direct pixel coordinates on img_w x img_h canvas
         let (px_x, px_y, px_w, px_h) = if ymax <= 1.0 && xmax <= 1.0 && (ymax > 0.0 || xmax > 0.0) {
             let x = ((xmin * img_w as f32).clamp(0.0, img_w as f32)) as u32;
             let y = ((ymin * img_h as f32).clamp(0.0, img_h as f32)) as u32;
             let w = (((xmax - xmin) * img_w as f32).max(0.0) as u32).min(img_w.saturating_sub(x));
             let h = (((ymax - ymin) * img_h as f32).max(0.0) as u32).min(img_h.saturating_sub(y));
             (x, y, w, h)
-        } else if ymax > 1000.0 || xmax > 1000.0 {
+        } else {
             // Direct pixel coordinates
             let x = (xmin.clamp(0.0, img_w as f32)) as u32;
             let y = (ymin.clamp(0.0, img_h as f32)) as u32;
             let w = ((xmax - xmin).max(0.0) as u32).min(img_w.saturating_sub(x));
             let h = ((ymax - ymin).max(0.0) as u32).min(img_h.saturating_sub(y));
-            (x, y, w, h)
-        } else {
-            // 0..1000 range
-            let ymin_norm = ymin.clamp(0.0, 1000.0);
-            let xmin_norm = xmin.clamp(0.0, 1000.0);
-            let ymax_norm = ymax.clamp(0.0, 1000.0);
-            let xmax_norm = xmax.clamp(0.0, 1000.0);
-
-            if xmax_norm <= xmin_norm || ymax_norm <= ymin_norm {
-                continue;
-            }
-
-            let x = ((xmin_norm / 1000.0) * img_w as f32).max(0.0) as u32;
-            let y = ((ymin_norm / 1000.0) * img_h as f32).max(0.0) as u32;
-            let w = (((xmax_norm - xmin_norm) / 1000.0) * img_w as f32)
-                .min((img_w.saturating_sub(x)) as f32) as u32;
-            let h = (((ymax_norm - ymin_norm) / 1000.0) * img_h as f32)
-                .min((img_h.saturating_sub(y)) as f32) as u32;
             (x, y, w, h)
         };
 
@@ -266,7 +256,7 @@ pub fn detect_and_crop_figures(
     Ok(cropped_figures)
 }
 
-fn detect_figures_with_qwen(image_path: &Path) -> Result<Vec<FigureDetection>> {
+fn detect_figures_with_qwen(image_path: &Path, img_w: u32, img_h: u32) -> Result<Vec<FigureDetection>> {
     let bytes = fs::read(image_path).context("failed to read image file for detection")?;
     let image_base64 = STANDARD.encode(&bytes);
 
@@ -291,13 +281,14 @@ fn detect_figures_with_qwen(image_path: &Path) -> Result<Vec<FigureDetection>> {
             format!("{}/v1/chat/completions", base_url.trim_end_matches('/'))
         };
 
+        let prompt = figure_detection_prompt(img_w, img_h);
         let payload = VisionDetectionRequest {
             model: model.clone(),
             messages: vec![VisionMessage {
                 role: "user".to_string(),
                 content: vec![
                     VisionContentPart::Text {
-                        text: FIGURE_DETECTION_PROMPT.to_string(),
+                        text: prompt,
                     },
                     VisionContentPart::ImageUrl {
                         image_url: ImageUrlObject {
@@ -342,6 +333,7 @@ fn detect_figures_with_qwen(image_path: &Path) -> Result<Vec<FigureDetection>> {
             .map(|s| s.as_str())
             .unwrap_or("[]");
 
+        println!("RAW QWEN DETECTION CONTENT:\n{raw_content}");
         parse_detection_json(raw_content)
     })
 }
@@ -446,15 +438,16 @@ pub fn refine_crop_boundaries(
         return (px_x, px_y, px_w, px_h);
     }
 
-    // Expand search area slightly (3.5% of dimension, min 15px, max 45px) to ensure no top borders,
-    // axis labels, superscript titles, or caption descenders are clipped even if the model's box was slightly tight.
-    let margin_x = ((img_w as f32) * 0.035).clamp(15.0, 45.0) as u32;
-    let margin_y = ((img_h as f32) * 0.035).clamp(15.0, 45.0) as u32;
+    // Keep margin_x tight (max 20px) to avoid jumping across 25..35px column gutters
+    let margin_x = 20u32;
+    // Allow looking slightly above (for figure titles) and below (for separated captions)
+    let margin_top = 35u32;
+    let margin_bot = 110u32;
 
     let search_x1 = px_x.saturating_sub(margin_x);
-    let search_y1 = px_y.saturating_sub(margin_y);
+    let search_y1 = px_y.saturating_sub(margin_top);
     let search_x2 = (px_x + px_w + margin_x).min(img_w);
-    let search_y2 = (px_y + px_h + margin_y).min(img_h);
+    let search_y2 = (px_y + px_h + margin_bot).min(img_h);
 
     if search_x2 <= search_x1 || search_y2 <= search_y1 {
         return (px_x, px_y, px_w, px_h);
@@ -467,14 +460,14 @@ pub fn refine_crop_boundaries(
     for x in (search_x1..search_x2).step_by(5) {
         let p_top = rgba.get_pixel(x, search_y1);
         let p_bot = rgba.get_pixel(x, search_y2.saturating_sub(1));
-        bg_samples.push(luminance(p_top));
-        bg_samples.push(luminance(p_bot));
+        if p_top[3] >= 30 { bg_samples.push(luminance(p_top)); }
+        if p_bot[3] >= 30 { bg_samples.push(luminance(p_bot)); }
     }
     for y in (search_y1..search_y2).step_by(5) {
         let p_left = rgba.get_pixel(search_x1, y);
         let p_right = rgba.get_pixel(search_x2.saturating_sub(1), y);
-        bg_samples.push(luminance(p_left));
-        bg_samples.push(luminance(p_right));
+        if p_left[3] >= 30 { bg_samples.push(luminance(p_left)); }
+        if p_right[3] >= 30 { bg_samples.push(luminance(p_right)); }
     }
 
     let bg_luma = if !bg_samples.is_empty() {
@@ -510,8 +503,7 @@ pub fn refine_crop_boundaries(
     let mut bands: Vec<ContentBand> = Vec::new();
     let mut current_band_start = None;
     let mut consecutive_blanks = 0u32;
-    // Minimum blank vertical space in rendered pixels separating a figure/caption from body text
-    let blank_gap_threshold = ((search_y2.saturating_sub(search_y1)) as f32 * 0.02).clamp(10.0, 30.0) as u32;
+    let blank_gap_threshold = 12u32;
 
     for y in search_y1..search_y2 {
         let count = (search_x1..search_x2)
@@ -547,80 +539,110 @@ pub fn refine_crop_boundaries(
         return (px_x, px_y, px_w, px_h);
     }
 
-    // Drop preceding bands caught solely by margin_y expansion:
+    // Drop preceding bands caught solely by margin_top expansion:
     // If a band ends well above px_y (outside the model's detected box), it belongs to
     // preceding body text above the candidate box.
     while bands.len() > 1 && bands[0].end <= px_y.saturating_sub(6) {
         bands.remove(0);
     }
 
-    // Drop trailing bands caught solely by margin_y expansion:
-    // If a band starts well after px_y + px_h, it belongs to following body text below the candidate box.
-    while bands.len() > 1 && bands.last().unwrap().start >= (px_y + px_h).saturating_add(6) {
-        bands.pop();
+    // Consider trailing bands at the bottom:
+    // We want to include the complete figure AND its caption (if located below the graphic).
+    // A caption band is a short text line (height <= 65px) separated from following body text.
+    let box_bottom = px_y + px_h;
+    let mut keep_up_to = 0;
+    for (idx, b) in bands.iter().enumerate() {
+        let h = b.end.saturating_sub(b.start);
+        if b.start <= box_bottom {
+            // Inside or overlapping the detected box: keep it
+            keep_up_to = idx;
+        } else if idx > 0 && b.start > box_bottom {
+            // This band is below the detected box. Could it be a separated caption?
+            let gap_from_prev = b.start.saturating_sub(bands[idx - 1].end);
+            if h <= 65 && gap_from_prev <= 55 {
+                // Yes! Short text line right below the graphic: this is the figure caption!
+                keep_up_to = idx;
+                // Figure strictly ends at its caption. Do not include anything further below!
+                break;
+            } else {
+                // Not a caption (e.g. big body paragraph or large gap); stop here
+                break;
+            }
+        }
     }
 
-    // Drop trailing body text paragraph:
-    // If the candidate box extended into a multi-line body paragraph beneath the figure/caption
-    // (height >= 100px after substantial content >= 60px), truncate before that trailing paragraph.
-    while bands.len() > 1 {
-        let last_idx = bands.len() - 1;
+    // Also check if the candidate box itself extended past the caption into trailing body paragraphs:
+    while keep_up_to > 0 && keep_up_to < bands.len() {
+        let last_idx = keep_up_to;
         let last_h = bands[last_idx].end.saturating_sub(bands[last_idx].start);
         let prev_h = bands[last_idx - 1].end.saturating_sub(bands[0].start);
-        if last_h >= 100 && prev_h >= 60 {
-            bands.pop();
+        if last_h >= 80 && prev_h >= 60 {
+            keep_up_to -= 1;
         } else {
             break;
         }
     }
 
+    bands.truncate(keep_up_to + 1);
+
     let content_y1 = bands[0].start;
     let content_y2 = bands.last().unwrap().end;
 
-    // Scan vertical columns from left to find start of content
-    let mut content_x1 = None;
-    for x in search_x1..search_x2 {
+    // Scan horizontal columns outward from mid_x to avoid jumping across column gutters
+    let mid_x = px_x + px_w / 2;
+    let mut cx1 = px_x;
+    let mut blanks_left = 0u32;
+    for x in (search_x1..=mid_x).rev() {
         let count = (content_y1..=content_y2)
             .filter(|&y| is_content(x, y))
             .take(min_content_pixels)
             .count();
         if count >= min_content_pixels {
-            content_x1 = Some(x);
-            break;
-        }
-    }
-
-    // Scan vertical columns from right to find end of content
-    let mut content_x2 = None;
-    for x in (search_x1..search_x2).rev() {
-        let count = (content_y1..=content_y2)
-            .filter(|&y| is_content(x, y))
-            .take(min_content_pixels)
-            .count();
-        if count >= min_content_pixels {
-            content_x2 = Some(x);
-            break;
-        }
-    }
-
-    match (content_x1, content_x2) {
-        (Some(cx1), Some(cx2)) if cx2 > cx1 && content_y2 > content_y1 => {
-            // Add a clean, consistent 14-pixel margin around graphic so top/bottom/side edges are never clipped
-            let pad = 14u32;
-            let final_x = cx1.saturating_sub(pad);
-            let final_y = content_y1.saturating_sub(pad);
-            let final_x2 = (cx2 + pad + 1).min(img_w);
-            let final_y2 = (content_y2 + pad + 1).min(img_h);
-            let final_w = final_x2.saturating_sub(final_x);
-            let final_h = final_y2.saturating_sub(final_y);
-
-            if final_w >= 15 && final_h >= 15 {
-                (final_x, final_y, final_w, final_h)
-            } else {
-                (px_x, px_y, px_w, px_h)
+            cx1 = x;
+            blanks_left = 0;
+        } else {
+            blanks_left += 1;
+            if x < px_x && blanks_left >= 8 {
+                break; // Hit a blank margin or gutter on the left
             }
         }
-        _ => (px_x, px_y, px_w, px_h),
+    }
+
+    let mut cx2 = px_x + px_w;
+    let mut blanks_right = 0u32;
+    for x in mid_x..search_x2 {
+        let count = (content_y1..=content_y2)
+            .filter(|&y| is_content(x, y))
+            .take(min_content_pixels)
+            .count();
+        if count >= min_content_pixels {
+            cx2 = x;
+            blanks_right = 0;
+        } else {
+            blanks_right += 1;
+            if x > px_x + px_w && blanks_right >= 8 {
+                break; // Hit a blank column gutter on the right
+            }
+        }
+    }
+
+    if cx2 > cx1 && content_y2 > content_y1 {
+        // Add a clean, consistent 14-pixel margin around graphic so top/bottom/side edges are never clipped
+        let pad = 14u32;
+        let final_x = cx1.saturating_sub(pad);
+        let final_y = content_y1.saturating_sub(pad);
+        let final_x2 = (cx2 + pad + 1).min(img_w);
+        let final_y2 = (content_y2 + pad + 1).min(img_h);
+        let final_w = final_x2.saturating_sub(final_x);
+        let final_h = final_y2.saturating_sub(final_y);
+
+        if final_w >= 15 && final_h >= 15 {
+            (final_x, final_y, final_w, final_h)
+        } else {
+            (px_x, px_y, px_w, px_h)
+        }
+    } else {
+        (px_x, px_y, px_w, px_h)
     }
 }
 
@@ -879,5 +901,40 @@ mod tests {
         // 4. Width must cover the widest tier (x=30..280): rx <= 16, rx+rw >= 294
         assert!(rx <= 20, "rx was {} (expected <= 20 to cover x=30)", rx);
         assert!(rx + rw >= 290, "Right edge rx+rw was {} (expected >= 290 to cover x=280)", rx + rw);
+    }
+
+    #[test]
+    fn test_refine_crop_preserves_column_gutter() {
+        use image::{Rgba, RgbaImage};
+
+        // Create a 500x300 white canvas representing a 2-column page
+        let mut img_buf = RgbaImage::from_pixel(500, 300, Rgba([255, 255, 255, 255]));
+
+        // Column 1: Graphic from x=40..200, y=50..200
+        for y in 50..200 {
+            for x in 40..200 {
+                img_buf.put_pixel(x, y, Rgba([0, 0, 0, 255]));
+            }
+        }
+
+        // Column Gutter: blank space from x=200..240 (40px blank gutter)
+
+        // Column 2: Text paragraph from x=240..450, y=50..250
+        for y in 50..250 {
+            for x in 240..450 {
+                img_buf.put_pixel(x, y, Rgba([0, 0, 0, 255]));
+            }
+        }
+
+        let dyn_img = image::DynamicImage::ImageRgba8(img_buf);
+        // Candidate box detects Column 1 graphic: px_x=30, px_y=45, px_w=180, px_h=165
+        let (rx, ry, rw, rh) = refine_crop_boundaries(&dyn_img, 30, 45, 180, 165);
+
+        // Content in Column 1 is x=40..200, y=50..200. With 14px padding:
+        // rx ~ 26, right edge rx+rw ~ 215. Must NOT cross the gutter into Column 2 (x >= 240)!
+        assert!(rx + rw < 230, "Right edge rx+rw ({}) must not cross gutter into Column 2 (>= 230)", rx + rw);
+        assert!(rx <= 30, "rx ({}) must enclose Column 1 graphic left edge", rx);
+        assert!(ry <= 40, "ry ({}) must enclose top edge", ry);
+        assert!(ry + rh >= 210, "ry+rh ({}) must enclose bottom edge", ry + rh);
     }
 }
