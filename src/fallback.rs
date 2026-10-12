@@ -58,3 +58,27 @@ pub fn render_pages_to_images(
 
     Ok(page_paths)
 }
+
+/// Determines the total number of pages in a PDF file quickly without rasterizing pages.
+pub fn get_pdf_page_count(pdf_path: &Path) -> Result<usize> {
+    let pdf_bytes = fs::read(pdf_path)
+        .with_context(|| format!("failed to read PDF file {}", pdf_path.display()))?;
+
+    if let Ok(document) = Pdf::new(pdf_bytes.clone()) {
+        let count = document.pages().len();
+        if count > 0 {
+            return Ok(count);
+        }
+    }
+
+    if let Ok(pages) = pdf_extract::extract_text_from_mem_by_pages(&pdf_bytes) {
+        if !pages.is_empty() {
+            return Ok(pages.len());
+        }
+    }
+
+    Err(anyhow!(
+        "failed to determine page count for PDF {}",
+        pdf_path.display()
+    ))
+}
