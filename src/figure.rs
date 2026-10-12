@@ -333,7 +333,6 @@ fn detect_figures_with_qwen(image_path: &Path, img_w: u32, img_h: u32) -> Result
             .map(|s| s.as_str())
             .unwrap_or("[]");
 
-        println!("RAW QWEN DETECTION CONTENT:\n{raw_content}");
         parse_detection_json(raw_content)
     })
 }
