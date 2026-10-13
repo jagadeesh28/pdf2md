@@ -37,7 +37,7 @@ scp /path/to/local/your_document.pdf jagadeesh28@<VM_IP_OR_HOSTNAME>:/home/jagad
 
 ### Upload All PDFs in a Directory
 ```bash
-scp /path/to/local/*.pdf jagadeesh28@<VM_IP_OR_HOSTNAME>:/home/jagadeesh28/Rust/pdf2md/input/
+ scp -r e:\Rust\pdf2md\input jagadeesh28@34.14.211.10:/home/jagadeesh28/Rust/pdf2md/
 ```
 
 > [!TIP] Using SSH Keys
@@ -138,11 +138,11 @@ In Obsidian:
 
 ## 🛠️ Quick Reference Cheat Sheet
 
-| Action | Command | Location |
-| :--- | :--- | :--- |
-| **Upload PDF** | `scp file.pdf jagadeesh28@<VM_IP>:/home/jagadeesh28/Rust/pdf2md/input/` | Local PC |
-| **Convert (Qwen)** | `cargo run --release -- input/file.pdf output/file.md 1 10` | Remote VM |
-| **Convert (Gemini)** | `cargo run --release -- input/file.pdf output/file.md 1 10 gemini` | Remote VM |
-| **Convert (Gemma)** | `cargo run --release -- input/file.pdf output/file.md 1 10 gemma` | Remote VM |
-| **Download Result** | `scp -r jagadeesh28@<VM_IP>:/home/jagadeesh28/Rust/pdf2md/output ./` | Local PC |
+| Action               | Command                                                                 | Location  |
+| :------------------- | :---------------------------------------------------------------------- | :-------- |
+| **Upload PDF**       | `scp file.pdf jagadeesh28@<VM_IP>:/home/jagadeesh28/Rust/pdf2md/input/` | Local PC  |
+| **Convert (Qwen)**   | `cargo run --release -- input/file.pdf output/file.md 1 10`             | Remote VM |
+| **Convert (Gemini)** | `cargo run --release -- input/file.pdf output/file.md 1 10 gemini`      | Remote VM |
+| **Convert (Gemma)**  | `cargo run --release -- input/file.pdf output/file.md 1 10 gemma`       | Remote VM |
+| **Download Result**  | `scp -r jagadeesh28@<VM_IP>:/home/jagadeesh28/Rust/pdf2md/output ./`    | Local PC  |
 
