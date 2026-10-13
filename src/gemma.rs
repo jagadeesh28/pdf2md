@@ -100,7 +100,11 @@ pub fn ocr_image_file(api_key: &str, image_path: &Path) -> Result<String> {
 - Align multi-line derivations or variable definitions using `\begin{aligned} ... \end{aligned}`.
 - Format matrices with `\begin{bmatrix} ... \end{bmatrix}` with clean multi-line layout and proper `\\` breaks.
 
-### 5. Strict Output Enforcement
+### 5. Figures & Captions
+- For any figures, diagrams, plots, or illustrations on the page, always transcribe the figure number and full caption verbatim in the Markdown text at the location where they appear (e.g. `*Figure 4.5.—Caption text...*`).
+- Do NOT omit figure numbers or figure captions from the text transcription.
+
+### 6. Strict Output Enforcement
 - Output ONLY the verbatim Markdown text.
 - Do NOT include markdown code block backticks (````markdown or ```) around the entire output.
 - Do NOT include any thoughts, reasoning, preambles, notes, or conversational commentary."#.to_string()),
