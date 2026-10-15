@@ -3,3 +3,7 @@ images/
 output/
 *.pdf
 Cargo.lock
+input/
+output1_113.md
+output1_117.md
+output1_115.md

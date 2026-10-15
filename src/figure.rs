@@ -9,7 +9,12 @@ use std::path::{Path, PathBuf};
 pub struct FigureDetection {
     #[serde(alias = "figure_id", alias = "label", alias = "name", alias = "title")]
     pub figure_number: String,
-    #[serde(default, alias = "figure_caption", alias = "desc", alias = "description")]
+    #[serde(
+        default,
+        alias = "figure_caption",
+        alias = "desc",
+        alias = "description"
+    )]
     pub caption: Option<String>,
     #[serde(alias = "box", alias = "bbox", alias = "bounding_box")]
     pub box_2d: BoundingBoxCoords,
@@ -42,9 +47,12 @@ impl BoundingBoxCoords {
                     Some((arr[0], arr[1], arr[2], arr[3]))
                 }
             }
-            BoundingBoxCoords::Map { ymin, xmin, ymax, xmax } => {
-                Some((*xmin, *ymin, *xmax, *ymax))
-            }
+            BoundingBoxCoords::Map {
+                ymin,
+                xmin,
+                ymax,
+                xmax,
+            } => Some((*xmin, *ymin, *xmax, *ymax)),
         }
     }
 }
@@ -103,7 +111,7 @@ struct ChatMessage {
 
 fn figure_detection_prompt(img_w: u32, img_h: u32) -> String {
     format!(
-r#"You are an expert document vision analyzer.
+        r#"You are an expert document vision analyzer.
 Your task is to detect ONLY actual, non-convertible visual figures and graphics on this page (such as plots, charts, graphs, flowcharts, schematics, engineering drawings, diagrams, and photos).
 
 IMAGE CANVAS DIMENSIONS:
@@ -140,9 +148,10 @@ CRITICAL EXTRACTION RULES:
     )
 }
 
-/// Detects figures on a document page image using Qwen Vision, refines boundaries tightly,
-/// and crops each into output_dir without overwriting existing files.
+/// Detects figures on a document page image using the active backend vision model,
+/// refines boundaries tightly, and crops each into output_dir without overwriting existing files.
 pub fn detect_and_crop_figures(
+    backend: crate::backends::OcrBackend,
     page_image_path: &Path,
     output_images_dir: &Path,
     page_num: usize,
@@ -163,14 +172,59 @@ pub fn detect_and_crop_figures(
 
     let (img_w, img_h) = img.dimensions();
 
-    let detections = match detect_figures_with_qwen(page_image_path, img_w, img_h) {
-        Ok(dets) => dets,
-        Err(err) => {
-            eprintln!(
-                "Warning: Qwen figure detection on page {} encountered: {err:#}. Skipping figure cropping for this page.",
-                page_num
-            );
-            return Ok(Vec::new());
+    let detections = match backend {
+        crate::backends::OcrBackend::Qwen => {
+            match detect_figures_with_qwen(page_image_path, img_w, img_h) {
+                Ok(dets) => dets,
+                Err(err) => {
+                    eprintln!(
+                        "Warning: Qwen figure detection on page {page_num} encountered: {err:#}. Skipping figure cropping for this page."
+                    );
+                    return Ok(Vec::new());
+                }
+            }
+        }
+        crate::backends::OcrBackend::Gemini => {
+            let api_key = match std::env::var("GEMINI_API_KEY") {
+                Ok(key) if !key.trim().is_empty() => key,
+                _ => {
+                    eprintln!(
+                        "Warning: Gemini figure detection on page {page_num} skipped (GEMINI_API_KEY not set)."
+                    );
+                    return Ok(Vec::new());
+                }
+            };
+            match detect_figures_with_gemini(&api_key, page_image_path, img_w, img_h) {
+                Ok(dets) => dets,
+                Err(err) => {
+                    eprintln!(
+                        "Warning: Gemini figure detection on page {page_num} encountered: {err:#}. Skipping figure cropping for this page."
+                    );
+                    return Ok(Vec::new());
+                }
+            }
+        }
+        crate::backends::OcrBackend::Gemma => {
+            let api_key = match std::env::var("GEMMA_API_KEY")
+                .or_else(|_| std::env::var("GEMINI_API_KEY"))
+            {
+                Ok(key) if !key.trim().is_empty() => key,
+                _ => {
+                    eprintln!(
+                        "Warning: Gemma figure detection on page {page_num} skipped (GEMMA_API_KEY / GEMINI_API_KEY not set)."
+                    );
+                    return Ok(Vec::new());
+                }
+            };
+            match detect_figures_with_gemma(&api_key, page_image_path, img_w, img_h) {
+                Ok(dets) => dets,
+                Err(err) => {
+                    eprintln!(
+                        "Warning: Gemma figure detection on page {page_num} encountered: {err:#}. Skipping figure cropping for this page."
+                    );
+                    return Ok(Vec::new());
+                }
+            }
         }
     };
 
@@ -256,85 +310,116 @@ pub fn detect_and_crop_figures(
     Ok(cropped_figures)
 }
 
-fn detect_figures_with_qwen(image_path: &Path, img_w: u32, img_h: u32) -> Result<Vec<FigureDetection>> {
+fn detect_figures_with_qwen(
+    image_path: &Path,
+    img_w: u32,
+    img_h: u32,
+) -> Result<Vec<FigureDetection>> {
     let bytes = fs::read(image_path).context("failed to read image file for detection")?;
     let image_base64 = STANDARD.encode(&bytes);
 
-    let runtime = tokio::runtime::Runtime::new()
-        .context("failed to create Tokio runtime for Qwen figure detection")?;
+    let base_url = std::env::var("QWEN_URL")
+        .or_else(|_| std::env::var("QWEN_API_BASE"))
+        .or_else(|_| std::env::var("LOCAL_LLM_URL"))
+        .unwrap_or_else(|_| "http://localhost:11434/v1".to_string());
 
-    runtime.block_on(async {
-        let base_url = std::env::var("QWEN_URL")
-            .or_else(|_| std::env::var("QWEN_API_BASE"))
-            .or_else(|_| std::env::var("LOCAL_LLM_URL"))
-            .unwrap_or_else(|_| "http://localhost:11434/v1".to_string());
+    let client = reqwest::blocking::Client::new();
+    let model = crate::backends::qwen::resolve_model_name(&client, &base_url);
+    let api_key = std::env::var("QWEN_API_KEY").unwrap_or_default();
 
-        let client = reqwest::Client::new();
-        let model = crate::qwen::resolve_model_name(&client, &base_url).await;
-        let api_key = std::env::var("QWEN_API_KEY").unwrap_or_default();
+    let endpoint = if base_url.ends_with("/chat/completions") {
+        base_url.clone()
+    } else if base_url.ends_with("/v1") {
+        format!("{base_url}/chat/completions")
+    } else {
+        format!("{}/v1/chat/completions", base_url.trim_end_matches('/'))
+    };
 
-        let endpoint = if base_url.ends_with("/chat/completions") {
-            base_url.clone()
-        } else if base_url.ends_with("/v1") {
-            format!("{base_url}/chat/completions")
-        } else {
-            format!("{}/v1/chat/completions", base_url.trim_end_matches('/'))
-        };
-
-        let prompt = figure_detection_prompt(img_w, img_h);
-        let payload = VisionDetectionRequest {
-            model: model.clone(),
-            messages: vec![VisionMessage {
-                role: "user".to_string(),
-                content: vec![
-                    VisionContentPart::Text {
-                        text: prompt,
+    let prompt = figure_detection_prompt(img_w, img_h);
+    let payload = VisionDetectionRequest {
+        model: model.clone(),
+        messages: vec![VisionMessage {
+            role: "user".to_string(),
+            content: vec![
+                VisionContentPart::Text { text: prompt },
+                VisionContentPart::ImageUrl {
+                    image_url: ImageUrlObject {
+                        url: format!("data:image/png;base64,{image_base64}"),
                     },
-                    VisionContentPart::ImageUrl {
-                        image_url: ImageUrlObject {
-                            url: format!("data:image/png;base64,{image_base64}"),
-                        },
-                    },
-                ],
-            }],
-            temperature: Some(0.1),
-        };
+                },
+            ],
+        }],
+        temperature: Some(0.1),
+    };
 
-        let mut request = client.post(&endpoint).json(&payload);
-        if !api_key.is_empty() {
-            request = request.header("Authorization", format!("Bearer {api_key}"));
-        }
+    let mut request = client.post(&endpoint).json(&payload);
+    if !api_key.is_empty() {
+        request = request.header("Authorization", format!("Bearer {api_key}"));
+    }
 
-        let response = request
-            .send()
-            .await
-            .with_context(|| format!("failed to send detection request to {endpoint}"))?;
+    let response = request
+        .send()
+        .with_context(|| format!("failed to send detection request to {endpoint}"))?;
 
-        let status = response.status();
-        let body = response
-            .text()
-            .await
-            .context("failed to read detection response body")?;
+    let status = response.status();
+    let body = response
+        .text()
+        .context("failed to read detection response body")?;
 
-        if !status.is_success() {
-            return Err(anyhow!(
-                "Qwen figure detection returned HTTP {status}: {body}"
-            ));
-        }
+    if !status.is_success() {
+        return Err(anyhow!(
+            "Qwen figure detection returned HTTP {status}: {body}"
+        ));
+    }
 
-        let parsed: OpenAiChatResponse = serde_json::from_str(&body)
-            .with_context(|| format!("failed to parse detection response: {body}"))?;
+    let parsed: OpenAiChatResponse = serde_json::from_str(&body)
+        .with_context(|| format!("failed to parse detection response: {body}"))?;
 
-        let raw_content = parsed
-            .choices
-            .first()
-            .and_then(|c| c.message.as_ref())
-            .and_then(|m| m.content.as_ref())
-            .map(|s| s.as_str())
-            .unwrap_or("[]");
+    let raw_content = parsed
+        .choices
+        .first()
+        .and_then(|c| c.message.as_ref())
+        .and_then(|m| m.content.as_ref())
+        .map(|s| s.as_str())
+        .unwrap_or("[]");
 
-        parse_detection_json(raw_content)
-    })
+    parse_detection_json(raw_content)
+}
+
+fn detect_figures_with_gemini(
+    api_key: &str,
+    image_path: &Path,
+    img_w: u32,
+    img_h: u32,
+) -> Result<Vec<FigureDetection>> {
+    let prompt = figure_detection_prompt(img_w, img_h);
+    let raw = crate::backends::gemini::detect_figures(api_key, image_path, &prompt)?;
+    parse_detection_json(&raw)
+}
+
+fn detect_figures_with_gemma(
+    api_key: &str,
+    image_path: &Path,
+    img_w: u32,
+    img_h: u32,
+) -> Result<Vec<FigureDetection>> {
+    let prompt = figure_detection_prompt(img_w, img_h);
+    let raw = crate::backends::gemma::detect_figures(api_key, image_path, &prompt)?;
+    parse_detection_json(&raw)
+}
+
+/// Convenience alias defaulting to Qwen figure detection for backwards compatibility.
+pub fn detect_and_crop_figures_default(
+    page_image_path: &Path,
+    output_images_dir: &Path,
+    page_num: usize,
+) -> Result<Vec<CroppedFigure>> {
+    detect_and_crop_figures(
+        crate::backends::OcrBackend::Qwen,
+        page_image_path,
+        output_images_dir,
+        page_num,
+    )
 }
 
 pub fn parse_detection_json(raw_content: &str) -> Result<Vec<FigureDetection>> {
@@ -387,7 +472,10 @@ pub fn sanitize_filename(label: &str) -> String {
     for c in label.chars() {
         if c.is_alphanumeric() || c == '-' || c == '_' {
             out.push(c);
-        } else if (c.is_whitespace() || c == '.' || c == ':') && !out.ends_with('-') && !out.is_empty() {
+        } else if (c.is_whitespace() || c == '.' || c == ':')
+            && !out.ends_with('-')
+            && !out.is_empty()
+        {
             out.push('-');
         }
     }
@@ -459,14 +547,22 @@ pub fn refine_crop_boundaries(
     for x in (search_x1..search_x2).step_by(5) {
         let p_top = rgba.get_pixel(x, search_y1);
         let p_bot = rgba.get_pixel(x, search_y2.saturating_sub(1));
-        if p_top[3] >= 30 { bg_samples.push(luminance(p_top)); }
-        if p_bot[3] >= 30 { bg_samples.push(luminance(p_bot)); }
+        if p_top[3] >= 30 {
+            bg_samples.push(luminance(p_top));
+        }
+        if p_bot[3] >= 30 {
+            bg_samples.push(luminance(p_bot));
+        }
     }
     for y in (search_y1..search_y2).step_by(5) {
         let p_left = rgba.get_pixel(search_x1, y);
         let p_right = rgba.get_pixel(search_x2.saturating_sub(1), y);
-        if p_left[3] >= 30 { bg_samples.push(luminance(p_left)); }
-        if p_right[3] >= 30 { bg_samples.push(luminance(p_right)); }
+        if p_left[3] >= 30 {
+            bg_samples.push(luminance(p_left));
+        }
+        if p_right[3] >= 30 {
+            bg_samples.push(luminance(p_right));
+        }
     }
 
     let bg_luma = if !bg_samples.is_empty() {
@@ -516,14 +612,14 @@ pub fn refine_crop_boundaries(
             consecutive_blanks = 0;
         } else {
             consecutive_blanks += 1;
-            if consecutive_blanks >= blank_gap_threshold {
-                if let Some(start) = current_band_start {
-                    let end = y.saturating_sub(consecutive_blanks);
-                    if end >= start {
-                        bands.push(ContentBand { start, end });
-                    }
-                    current_band_start = None;
+            if consecutive_blanks >= blank_gap_threshold
+                && let Some(start) = current_band_start
+            {
+                let end = y.saturating_sub(consecutive_blanks);
+                if end >= start {
+                    bands.push(ContentBand { start, end });
                 }
+                current_band_start = None;
             }
         }
     }
@@ -664,7 +760,10 @@ mod tests {
         let res = parse_detection_json(json_data).unwrap();
         assert_eq!(res.len(), 2);
         assert_eq!(res[0].figure_number, "Figure VII-3");
-        assert_eq!(res[0].box_2d.to_coords(), Some((100.0, 150.0, 600.0, 850.0)));
+        assert_eq!(
+            res[0].box_2d.to_coords(),
+            Some((100.0, 150.0, 600.0, 850.0))
+        );
     }
 
     #[test]
@@ -699,7 +798,10 @@ mod tests {
         assert_eq!(sanitize_figure_label("Fig. 4", 1, 1), "Figure 4");
         assert_eq!(sanitize_figure_label("Figure 2.1", 1, 1), "Figure 2.1");
         assert_eq!(sanitize_figure_label("", 3, 1), "Figure P3-1");
-        assert_eq!(sanitize_figure_label("Figure (Untitled)", 3, 2), "Figure P3-2");
+        assert_eq!(
+            sanitize_figure_label("Figure (Untitled)", 3, 2),
+            "Figure P3-2"
+        );
         assert_eq!(sanitize_figure_label("untitled", 4, 1), "Figure P4-1");
     }
 
@@ -795,7 +897,11 @@ mod tests {
 
         // Refined crop MUST include the caption (bottom should be past 195 + pad)
         assert_eq!(ry, 6); // 20 - 14pad
-        assert!(ry + rh >= 200, "Refined bottom {} should enclose the caption (>= 200)", ry + rh);
+        assert!(
+            ry + rh >= 200,
+            "Refined bottom {} should enclose the caption (>= 200)",
+            ry + rh
+        );
     }
 
     #[test]
@@ -826,7 +932,11 @@ mod tests {
 
         // The refinement must detect the blank gap after y=150 and truncate before the trailing paragraph
         assert_eq!(ry, 6); // 20 - 14pad
-        assert!(ry + rh <= 170, "Refined bottom {} should be at or before gap (<= 170)", ry + rh);
+        assert!(
+            ry + rh <= 170,
+            "Refined bottom {} should be at or before gap (<= 170)",
+            ry + rh
+        );
         assert!(rw >= 200, "Refined width {} should cover the content", rw);
     }
 
@@ -889,17 +999,33 @@ mod tests {
         let (rx, ry, rw, rh) = refine_crop_boundaries(&dyn_img, 20, 45, 270, 260);
 
         // 1. Preceding text at y=15..25 must be excluded: ry must start around 50 - 14pad = 36
-        assert!(ry >= 35 && ry <= 40, "ry was {} (expected ~36, excluding preceding text at y=15..25)", ry);
+        assert!(
+            (35..=40).contains(&ry),
+            "ry was {} (expected ~36, excluding preceding text at y=15..25)",
+            ry
+        );
 
         // 2. Trailing text at y=325..460 must be excluded: bottom must be before y=320
-        assert!(ry + rh <= 320, "Bottom ry+rh was {} (expected <= 320, excluding trailing paragraph at y=325)", ry + rh);
+        assert!(
+            ry + rh <= 320,
+            "Bottom ry+rh was {} (expected <= 320, excluding trailing paragraph at y=325)",
+            ry + rh
+        );
 
         // 3. Caption at y=275..295 must be INCLUDED: bottom must be after 295 + 14pad = 309
-        assert!(ry + rh >= 305, "Bottom ry+rh was {} (expected >= 305, enclosing caption up to y=295)", ry + rh);
+        assert!(
+            ry + rh >= 305,
+            "Bottom ry+rh was {} (expected >= 305, enclosing caption up to y=295)",
+            ry + rh
+        );
 
         // 4. Width must cover the widest tier (x=30..280): rx <= 16, rx+rw >= 294
         assert!(rx <= 20, "rx was {} (expected <= 20 to cover x=30)", rx);
-        assert!(rx + rw >= 290, "Right edge rx+rw was {} (expected >= 290 to cover x=280)", rx + rw);
+        assert!(
+            rx + rw >= 290,
+            "Right edge rx+rw was {} (expected >= 290 to cover x=280)",
+            rx + rw
+        );
     }
 
     #[test]
@@ -931,9 +1057,21 @@ mod tests {
 
         // Content in Column 1 is x=40..200, y=50..200. With 14px padding:
         // rx ~ 26, right edge rx+rw ~ 215. Must NOT cross the gutter into Column 2 (x >= 240)!
-        assert!(rx + rw < 230, "Right edge rx+rw ({}) must not cross gutter into Column 2 (>= 230)", rx + rw);
-        assert!(rx <= 30, "rx ({}) must enclose Column 1 graphic left edge", rx);
+        assert!(
+            rx + rw < 230,
+            "Right edge rx+rw ({}) must not cross gutter into Column 2 (>= 230)",
+            rx + rw
+        );
+        assert!(
+            rx <= 30,
+            "rx ({}) must enclose Column 1 graphic left edge",
+            rx
+        );
         assert!(ry <= 40, "ry ({}) must enclose top edge", ry);
-        assert!(ry + rh >= 210, "ry+rh ({}) must enclose bottom edge", ry + rh);
+        assert!(
+            ry + rh >= 210,
+            "ry+rh ({}) must enclose bottom edge",
+            ry + rh
+        );
     }
 }
