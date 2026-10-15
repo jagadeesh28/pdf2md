@@ -185,7 +185,7 @@ where
     let pdf_bytes = fs::read(input_path).ok();
     let pdf_pages = pdf_bytes
         .as_ref()
-        .and_then(|bytes| pdf_extract::extract_text_from_mem_by_pages(bytes).ok());
+        .and_then(|bytes| crate::pdf::safe_extract_text_by_pages(bytes));
 
     let concurrency = resolve_concurrency();
     let total_pages = page_images.len();

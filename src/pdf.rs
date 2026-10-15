@@ -88,6 +88,18 @@ pub fn render_pages_to_images(
     Ok(page_paths)
 }
 
+/// Safely extracts text by pages from PDF memory, catching and suppressing any panics
+/// caused by malformed/unsupported font encoding tables inside pdf-extract.
+pub fn safe_extract_text_by_pages(bytes: &[u8]) -> Option<Vec<String>> {
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        pdf_extract::extract_text_from_mem_by_pages(bytes).ok()
+    }));
+    std::panic::set_hook(prev_hook);
+    res.ok().flatten()
+}
+
 /// Determines the total number of pages in a PDF file quickly without rasterizing pages.
 pub fn get_pdf_page_count(pdf_path: &Path) -> Result<usize> {
     let pdf_bytes = fs::read(pdf_path)
@@ -100,7 +112,7 @@ pub fn get_pdf_page_count(pdf_path: &Path) -> Result<usize> {
         }
     }
 
-    if let Ok(pages) = pdf_extract::extract_text_from_mem_by_pages(&pdf_bytes)
+    if let Some(pages) = safe_extract_text_by_pages(&pdf_bytes)
         && !pages.is_empty()
     {
         return Ok(pages.len());
@@ -123,8 +135,8 @@ pub fn extract_pdf_text(
     let bytes = fs::read(input_path)
         .with_context(|| format!("failed to read PDF file {}", input_path.display()))?;
 
-    let pages = pdf_extract::extract_text_from_mem_by_pages(&bytes)
-        .with_context(|| format!("failed to parse PDF {}", input_path.display()))?;
+    let pages = safe_extract_text_by_pages(&bytes)
+        .ok_or_else(|| anyhow!("failed to parse PDF text streams in {}", input_path.display()))?;
     if end_page > pages.len() {
         return Err(anyhow!(
             "page range {}-{} is outside the PDF's {} pages",
