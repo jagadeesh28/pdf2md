@@ -11,15 +11,15 @@ use crate::figure::{self, CroppedFigure};
 use crate::markdown::{PdfExtractionResult, attach_figures_to_page_text, render_markdown};
 use crate::pdf::{render_pages_to_images, validate_page_range};
 
-/// Resolves worker concurrency count from `PDF2MD_CONCURRENCY` or `CONCURRENCY` env vars (default: 2).
+/// Resolves worker concurrency count from `PDF2MD_CONCURRENCY` or `CONCURRENCY` env vars (default: 1).
 pub fn resolve_concurrency() -> usize {
     if let Ok(val) = std::env::var("PDF2MD_CONCURRENCY").or_else(|_| std::env::var("CONCURRENCY"))
         && let Ok(parsed) = val.parse::<usize>()
     {
         return parsed.max(1);
     }
-    // Default to 2 concurrent page workers to achieve 2x speedup without overloading VRAM
-    2
+    // Default to 1 concurrent page worker for stable CPU and GPU execution without slot contention
+    1
 }
 
 /// Converts a single PDF file using the default backend.

@@ -28,7 +28,7 @@ Supported backends:
 
 Environment variables:
     PDF2MD_BACKEND      Default OCR backend (default: qwen)
-    PDF2MD_CONCURRENCY  Number of concurrent page workers (default: 2)
+    PDF2MD_CONCURRENCY  Number of concurrent page workers (default: 1)
     QWEN_URL            Local Qwen endpoint URL (default: http://localhost:11434/v1)
     QWEN_MODEL          Model name (default: qwen2.5-coder:latest)
     QWEN_API_KEY        Optional API key for local endpoint

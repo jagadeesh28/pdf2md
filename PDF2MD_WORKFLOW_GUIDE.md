@@ -146,3 +146,5 @@ In Obsidian:
 | **Convert (Gemma)**  | `cargo run --release -- input/file.pdf output/file.md 1 10 gemma`       | Remote VM |
 | **Download Result**  | `scp -r jagadeesh28@<VM_IP>:/home/jagadeesh28/Rust/pdf2md/output ./`    | Local PC  |
 
+without any connection to basic as daemon process
+nohup cargo run --release -- /home/jagadeesh28/Rust/pdf2md/input/Five output > /dev/null 2>&1 &
