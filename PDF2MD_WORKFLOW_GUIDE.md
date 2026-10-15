@@ -147,4 +147,4 @@ In Obsidian:
 | **Download Result**  | `scp -r jagadeesh28@<VM_IP>:/home/jagadeesh28/Rust/pdf2md/output ./`    | Local PC  |
 
 without any connection to basic as daemon process
-nohup cargo run --release -- /home/jagadeesh28/Rust/pdf2md/input/Five output > /dev/null 2>&1 &
+nohup cargo run --release -- /home/jagadeesh28/Rust/pdf2md/input/Five output > output/log.txt 2>&1 &

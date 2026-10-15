@@ -11,15 +11,15 @@ use crate::figure::{self, CroppedFigure};
 use crate::markdown::{PdfExtractionResult, attach_figures_to_page_text, render_markdown};
 use crate::pdf::{render_pages_to_images, validate_page_range};
 
-/// Resolves worker concurrency count from `PDF2MD_CONCURRENCY` or `CONCURRENCY` env vars (default: 1).
+/// Resolves worker concurrency count from `PDF2MD_CONCURRENCY` or `CONCURRENCY` env vars (default: 2).
 pub fn resolve_concurrency() -> usize {
     if let Ok(val) = std::env::var("PDF2MD_CONCURRENCY").or_else(|_| std::env::var("CONCURRENCY"))
         && let Ok(parsed) = val.parse::<usize>()
     {
         return parsed.max(1);
     }
-    // Default to 1 concurrent page worker for stable CPU and GPU execution without slot contention
-    1
+    // Default to 2 concurrent page workers now that Ollama is configured with OLLAMA_NUM_PARALLEL=2 on the L4 GPU
+    2
 }
 
 /// Converts a single PDF file using the default backend.
@@ -345,7 +345,23 @@ fn process_single_page(
                         )
                     }
                 } else {
-                    return Err(err);
+                    if let Some(txt) = raw_page_text {
+                        eprintln!(
+                            "Warning: Page {page_num} vision OCR failed ({err_msg}); falling back to extracted PDF text..."
+                        );
+                        match qwen::transcribe_text(txt) {
+                            Ok(formatted) => formatted,
+                            Err(_) => txt.to_string(),
+                        }
+                    } else {
+                        eprintln!(
+                            "Warning: Page {page_num} vision OCR failed ({err_msg}) and no raw text was available in the PDF. Emitting placeholder note so document conversion continues."
+                        );
+                        format!(
+                            "> [!WARNING] Page {page_num} Transcription Incomplete\n\
+                             > Local vision model failed to transcribe this page: {err_msg}\n"
+                        )
+                    }
                 }
             }
         },

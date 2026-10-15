@@ -3,6 +3,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
+use std::time::Duration;
 
 #[derive(Debug, Serialize)]
 struct OpenAiChatRequest {
@@ -203,6 +204,19 @@ pub fn normalize_chat_completions_url(base_url: &str) -> String {
     }
 }
 
+pub fn create_http_client() -> reqwest::blocking::Client {
+    let timeout_secs = std::env::var("PDF2MD_TIMEOUT_SECS")
+        .or_else(|_| std::env::var("QWEN_TIMEOUT_SECS"))
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(600);
+
+    reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(timeout_secs))
+        .build()
+        .unwrap_or_else(|_| reqwest::blocking::Client::new())
+}
+
 pub fn ocr_image_file(image_path: &Path) -> Result<String> {
     let bytes = fs::read(image_path).context("failed to read OCR image file")?;
     let image_base64 = STANDARD.encode(&bytes);
@@ -212,7 +226,7 @@ pub fn ocr_image_file(image_path: &Path) -> Result<String> {
         .or_else(|_| std::env::var("LOCAL_LLM_URL"))
         .unwrap_or_else(|_| "http://localhost:11434/v1".to_string());
 
-    let client = reqwest::blocking::Client::new();
+    let client = create_http_client();
     let model = resolve_model_name(&client, &base_url);
     let temperature: f32 = std::env::var("QWEN_TEMPERATURE")
         .ok()
@@ -383,7 +397,7 @@ pub fn transcribe_text(text: &str) -> Result<String> {
         .or_else(|_| std::env::var("LOCAL_LLM_URL"))
         .unwrap_or_else(|_| "http://localhost:11434/v1".to_string());
 
-    let client = reqwest::blocking::Client::new();
+    let client = create_http_client();
     let model = resolve_model_name(&client, &base_url);
     let api_key = std::env::var("QWEN_API_KEY").unwrap_or_default();
 

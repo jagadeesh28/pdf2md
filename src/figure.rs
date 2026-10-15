@@ -323,7 +323,7 @@ fn detect_figures_with_qwen(
         .or_else(|_| std::env::var("LOCAL_LLM_URL"))
         .unwrap_or_else(|_| "http://localhost:11434/v1".to_string());
 
-    let client = reqwest::blocking::Client::new();
+    let client = crate::backends::qwen::create_http_client();
     let model = crate::backends::qwen::resolve_model_name(&client, &base_url);
     let api_key = std::env::var("QWEN_API_KEY").unwrap_or_default();
 
