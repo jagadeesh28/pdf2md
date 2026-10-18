@@ -135,8 +135,12 @@ pub fn extract_pdf_text(
     let bytes = fs::read(input_path)
         .with_context(|| format!("failed to read PDF file {}", input_path.display()))?;
 
-    let pages = safe_extract_text_by_pages(&bytes)
-        .ok_or_else(|| anyhow!("failed to parse PDF text streams in {}", input_path.display()))?;
+    let pages = safe_extract_text_by_pages(&bytes).ok_or_else(|| {
+        anyhow!(
+            "failed to parse PDF text streams in {}",
+            input_path.display()
+        )
+    })?;
     if end_page > pages.len() {
         return Err(anyhow!(
             "page range {}-{} is outside the PDF's {} pages",

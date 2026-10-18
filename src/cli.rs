@@ -52,7 +52,10 @@ pub fn run() {
 
     if raw_args[0] == "--fix-math" || raw_args[0] == "--normalize-math" {
         if raw_args.len() < 2 {
-            eprintln!("Error: Flag '{}' requires a file or directory path", raw_args[0]);
+            eprintln!(
+                "Error: Flag '{}' requires a file or directory path",
+                raw_args[0]
+            );
             process::exit(1);
         }
         let target = Path::new(&raw_args[1]);
@@ -62,7 +65,9 @@ pub fn run() {
         }
         match fix_math_in_path(target) {
             Ok(count) => {
-                println!("Successfully normalized LaTeX math delimiters in {count} markdown file(s).");
+                println!(
+                    "Successfully normalized LaTeX math delimiters in {count} markdown file(s)."
+                );
                 process::exit(0);
             }
             Err(e) => {
@@ -269,7 +274,9 @@ pub fn run() {
 pub fn fix_math_in_path(path: &Path) -> anyhow::Result<usize> {
     let mut count = 0;
     if path.is_file() {
-        if path.extension().map_or(false, |ext| ext.eq_ignore_ascii_case("md"))
+        if path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
             && fix_math_in_file(path)?
         {
             count += 1;
@@ -288,7 +295,8 @@ fn fix_math_in_dir(dir: &Path) -> anyhow::Result<usize> {
         if p.is_dir() {
             count += fix_math_in_dir(&p)?;
         } else if p.is_file()
-            && p.extension().map_or(false, |ext| ext.eq_ignore_ascii_case("md"))
+            && p.extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
             && fix_math_in_file(&p)?
         {
             count += 1;

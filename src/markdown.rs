@@ -167,9 +167,9 @@ fn convert_delimiters_outside_code_blocks(text: &str) -> String {
                 result.push_str(code_span);
                 remaining = &after_tick[close_pos + 1..];
             } else {
-                // Unclosed backtick, just push the rest
-                result.push_str(remaining);
-                break;
+                // Unclosed backtick: push literal backtick and continue processing after_tick
+                result.push('`');
+                remaining = after_tick;
             }
         } else {
             result.push_str(&convert_math_spans(remaining));
@@ -367,9 +367,13 @@ mod tests {
     #[test]
     fn test_normalize_latex_delimiters() {
         // Inline math with extra whitespace trimmed
-        let input = "Surface temperature of \\( T_S \\) rises to \\(T_1\\) where \\( u_g \\) is velocity.";
+        let input =
+            "Surface temperature of \\( T_S \\) rises to \\(T_1\\) where \\( u_g \\) is velocity.";
         let normalized = normalize_latex_delimiters(input);
-        assert_eq!(normalized, "Surface temperature of $T_S$ rises to $T_1$ where $u_g$ is velocity.");
+        assert_eq!(
+            normalized,
+            "Surface temperature of $T_S$ rises to $T_1$ where $u_g$ is velocity."
+        );
 
         // Multi-line block math
         let block_input = "Equation:\n\\[\n\\rho_p r = \\rho_g u_g\n\\]\nFollowed by text.";
@@ -395,6 +399,13 @@ mod tests {
         assert_eq!(
             normalize_latex_delimiters(inline_code),
             "Use `\\(x\\)` function and $y$ variable."
+        );
+
+        // Lone unclosed backtick does not duplicate content
+        let unclosed = "Prefix before backtick `iplot' with math \\(z = 1\\).";
+        assert_eq!(
+            normalize_latex_delimiters(unclosed),
+            "Prefix before backtick `iplot' with math $z = 1$."
         );
     }
 }
