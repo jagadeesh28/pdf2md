@@ -61,7 +61,7 @@ pub fn render_markdown(result: &PdfExtractionResult) -> String {
         }
     }
 
-    output
+    normalize_latex_delimiters(&output)
 }
 
 /// Injects detected figure image links into the appropriate locations of the page text.
@@ -110,6 +110,138 @@ pub fn attach_figures_to_page_text(page_text: &str, figures: &[CroppedFigure]) -
         }
     }
 
+    result
+}
+
+/// Normalizes LaTeX math delimiters from standard LaTeX (`\(...\)` and `\[...\]`)
+/// to Obsidian-compatible Markdown delimiters (`$...$` for inline, `$$...$$` for block math).
+/// Content inside fenced code blocks (``` ... ```) and inline code (`...`) is preserved untouched.
+pub fn normalize_latex_delimiters(content: &str) -> String {
+    let mut result = String::with_capacity(content.len());
+    let mut in_code_block = false;
+    let mut remaining = content;
+
+    while !remaining.is_empty() {
+        if in_code_block {
+            if let Some(pos) = remaining.find("```") {
+                let end = pos + 3;
+                result.push_str(&remaining[..end]);
+                remaining = &remaining[end..];
+                in_code_block = false;
+            } else {
+                result.push_str(remaining);
+                break;
+            }
+        } else {
+            let next_code = remaining.find("```");
+            let (text_to_process, rest) = match next_code {
+                Some(pos) => (&remaining[..pos], &remaining[pos..]),
+                None => (remaining, ""),
+            };
+
+            result.push_str(&convert_delimiters_outside_code_blocks(text_to_process));
+            remaining = rest;
+            if !remaining.is_empty() {
+                in_code_block = true;
+                result.push_str("```");
+                remaining = &remaining[3..];
+            }
+        }
+    }
+
+    result
+}
+
+fn convert_delimiters_outside_code_blocks(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut remaining = text;
+
+    while !remaining.is_empty() {
+        if let Some(pos) = remaining.find('`') {
+            let before = &remaining[..pos];
+            result.push_str(&convert_math_spans(before));
+
+            let after_tick = &remaining[pos + 1..];
+            if let Some(close_pos) = after_tick.find('`') {
+                let code_span = &remaining[pos..pos + 1 + close_pos + 1];
+                result.push_str(code_span);
+                remaining = &after_tick[close_pos + 1..];
+            } else {
+                // Unclosed backtick, just push the rest
+                result.push_str(remaining);
+                break;
+            }
+        } else {
+            result.push_str(&convert_math_spans(remaining));
+            break;
+        }
+    }
+
+    result
+}
+
+fn convert_math_spans(text: &str) -> String {
+    let with_blocks = convert_block_math(text);
+    convert_inline_math(&with_blocks)
+}
+
+fn convert_block_math(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut remaining = text;
+
+    while let Some(start) = remaining.find("\\[") {
+        result.push_str(&remaining[..start]);
+        let after_start = &remaining[start + 2..];
+        if let Some(end) = after_start.find("\\]") {
+            let formula = &after_start[..end];
+            if formula.contains('\n') {
+                let trimmed = formula.trim_matches(|c| c == '\r' || c == '\n');
+                result.push_str("$$\n");
+                result.push_str(trimmed);
+                result.push_str("\n$$");
+            } else {
+                let trimmed = formula.trim();
+                result.push_str("$$");
+                result.push_str(trimmed);
+                result.push_str("$$");
+            }
+            remaining = &after_start[end + 2..];
+        } else {
+            result.push_str("\\[");
+            remaining = after_start;
+        }
+    }
+    result.push_str(remaining);
+    result
+}
+
+fn convert_inline_math(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut remaining = text;
+
+    while let Some(start) = remaining.find("\\(") {
+        result.push_str(&remaining[..start]);
+        let after_start = &remaining[start + 2..];
+        if let Some(end) = after_start.find("\\)") {
+            let formula = &after_start[..end];
+            // Inline math shouldn't cross empty paragraph lines
+            if !formula.contains("\n\n") {
+                let trimmed = formula.trim();
+                if !trimmed.is_empty() {
+                    result.push('$');
+                    result.push_str(trimmed);
+                    result.push('$');
+                } else {
+                    result.push_str("\\(\\)");
+                }
+                remaining = &after_start[end + 2..];
+                continue;
+            }
+        }
+        result.push_str("\\(");
+        remaining = after_start;
+    }
+    result.push_str(remaining);
     result
 }
 
@@ -229,6 +361,40 @@ mod tests {
         assert!(attached2.contains("![Figure 4.7](images/Figure-4-7.png)"));
         assert!(
             attached2.contains("*Figure 4.7. Variation of species mole fractions with distance.*")
+        );
+    }
+
+    #[test]
+    fn test_normalize_latex_delimiters() {
+        // Inline math with extra whitespace trimmed
+        let input = "Surface temperature of \\( T_S \\) rises to \\(T_1\\) where \\( u_g \\) is velocity.";
+        let normalized = normalize_latex_delimiters(input);
+        assert_eq!(normalized, "Surface temperature of $T_S$ rises to $T_1$ where $u_g$ is velocity.");
+
+        // Multi-line block math
+        let block_input = "Equation:\n\\[\n\\rho_p r = \\rho_g u_g\n\\]\nFollowed by text.";
+        let normalized_block = normalize_latex_delimiters(block_input);
+        assert_eq!(
+            normalized_block,
+            "Equation:\n$$\n\\rho_p r = \\rho_g u_g\n$$\nFollowed by text."
+        );
+
+        // Single-line block math
+        let single_block = "\\[ E = mc^2 \\]";
+        assert_eq!(normalize_latex_delimiters(single_block), "$$E = mc^2$$");
+
+        // Code blocks are untouched
+        let code_input = "```latex\n\\(x\\)\n\\[y\\]\n```\nAnd outside: \\(z\\)";
+        assert_eq!(
+            normalize_latex_delimiters(code_input),
+            "```latex\n\\(x\\)\n\\[y\\]\n```\nAnd outside: $z$"
+        );
+
+        // Inline code spans are untouched
+        let inline_code = "Use `\\(x\\)` function and \\(y\\) variable.";
+        assert_eq!(
+            normalize_latex_delimiters(inline_code),
+            "Use `\\(x\\)` function and $y$ variable."
         );
     }
 }

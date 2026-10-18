@@ -117,7 +117,9 @@ Adhere strictly to these formatting rules:
 2. Structure: Use standard Markdown headings (#, ##, ###, ####) reflecting document hierarchy.
 3. Multi-Column: For multi-column pages or bibliographic metadata blocks, transcribe in natural reading order (column-by-column, top-to-bottom). Do not interleave text across adjacent columns.
 4. Tables: Represent tables faithfully using Markdown table syntax.
-5. Mathematics: Represent all mathematical notation using LaTeX delimiters supported by Obsidian: use $...$ for inline formulas/variables, and $$...$$ on separate lines for display equations.
+5. Mathematics: Represent all mathematical notation strictly using Obsidian Markdown LaTeX delimiters:
+   - For inline formulas and variables: ALWAYS use single dollar delimiters $...$ (e.g. $T_s$, $u_g$, $x$, $\rho_p$). NEVER use \(...\).
+   - For display/block equations: ALWAYS use double dollar delimiters ($$ ... $$) on separate lines. NEVER use \[...\].
 6. Typography: Preserve exact wording, capitalization, punctuation, bold (**text**), italic (*text*), and Roman numerals (e.g., 'ii', 'iii', 'iv'). Do not transcribe accession stamps, ink date stamps, or barcodes.
 7. Figures and Captions: For any figures, diagrams, plots, charts, or illustrations on the page, always transcribe the figure number and complete caption verbatim in the Markdown text at the location where they appear (e.g. `*Figure 4.5.—Caption text...*`). Do NOT omit figure numbers or figure captions from the text transcription."#;
 
@@ -130,7 +132,9 @@ Adhere strictly to these formatting rules:
 1. Output ONLY the verbatim Markdown document. Never include preambles, explanations, thinking steps, or markdown code block fences (e.g. ```markdown) around the output.
 2. Structure: Use standard Markdown headings (#, ##, ###, ####) reflecting document hierarchy.
 3. Tables: Represent tables faithfully using Markdown table syntax.
-4. Mathematics: Represent mathematical formulas and variables using LaTeX delimiters supported by Obsidian ($...$ for inline, $$...$$ for block).
+4. Mathematics: Represent all mathematical formulas and variables strictly using Obsidian Markdown LaTeX delimiters:
+   - For inline formulas and variables: ALWAYS use single dollar delimiters $...$ (e.g. $T_s$, $u_g$, $x$, $\rho_p$). NEVER use \(...\).
+   - For display/block equations: ALWAYS use double dollar delimiters ($$ ... $$) on separate lines. NEVER use \[...\].
 5. Clean up OCR/extraction artifacts and fix line breaks mid-sentence to restore natural reading flow.
 6. Figures and Captions: Always preserve and transcribe all figure numbers and figure captions verbatim in the Markdown text."#;
 
@@ -548,7 +552,7 @@ pub fn clean_model_markdown(raw_text: &str) -> String {
     }
 
     let trimmed = text.trim();
-    if (trimmed.starts_with("```markdown") || trimmed.starts_with("```"))
+    let stripped = if (trimmed.starts_with("```markdown") || trimmed.starts_with("```"))
         && trimmed.ends_with("```")
     {
         let lines: Vec<&str> = trimmed.lines().collect();
@@ -559,7 +563,9 @@ pub fn clean_model_markdown(raw_text: &str) -> String {
         }
     } else {
         trimmed.to_string()
-    }
+    };
+
+    crate::markdown::normalize_latex_delimiters(&stripped)
 }
 
 #[cfg(test)]
@@ -610,5 +616,11 @@ mod tests {
 
         let with_think = "<think>\nThinking about the image...\n</think>\n# Output";
         assert_eq!(clean_model_markdown(with_think), "# Output");
+
+        let with_latex = "Pressure \\( p \\) and equation:\n\\[\nE = mc^2\n\\]";
+        assert_eq!(
+            clean_model_markdown(with_latex),
+            "Pressure $p$ and equation:\n$$\nE = mc^2\n$$"
+        );
     }
 }

@@ -18,6 +18,9 @@ pub fn print_usage() {
     # Batch directory conversion:
     pdf2md <input-dir> <output-dir> [begin-page] [end-page] [backend]
 
+    # Normalize LaTeX math delimiters to Obsidian format ($...$ and $$...$$):
+    pdf2md --fix-math <path-to-file-or-dir>
+
     # With backend flag:
     pdf2md --backend <backend> <input-path> <output-path> [begin-page] [end-page]
 
@@ -45,6 +48,28 @@ pub fn run() {
     if raw_args.is_empty() || raw_args.iter().any(|arg| arg == "-h" || arg == "--help") {
         print_usage();
         process::exit(if raw_args.is_empty() { 1 } else { 0 });
+    }
+
+    if raw_args[0] == "--fix-math" || raw_args[0] == "--normalize-math" {
+        if raw_args.len() < 2 {
+            eprintln!("Error: Flag '{}' requires a file or directory path", raw_args[0]);
+            process::exit(1);
+        }
+        let target = Path::new(&raw_args[1]);
+        if !target.exists() {
+            eprintln!("Error: Path '{}' does not exist", target.display());
+            process::exit(1);
+        }
+        match fix_math_in_path(target) {
+            Ok(count) => {
+                println!("Successfully normalized LaTeX math delimiters in {count} markdown file(s).");
+                process::exit(0);
+            }
+            Err(e) => {
+                eprintln!("Error normalizing math: {e:#}");
+                process::exit(1);
+            }
+        }
     }
 
     let mut backend_override: Option<OcrBackend> = None;
@@ -238,5 +263,48 @@ pub fn run() {
             eprintln!("PDF conversion failed: {err:#}");
             process::exit(1);
         }
+    }
+}
+
+pub fn fix_math_in_path(path: &Path) -> anyhow::Result<usize> {
+    let mut count = 0;
+    if path.is_file() {
+        if path.extension().map_or(false, |ext| ext.eq_ignore_ascii_case("md"))
+            && fix_math_in_file(path)?
+        {
+            count += 1;
+        }
+    } else if path.is_dir() {
+        count = fix_math_in_dir(path)?;
+    }
+    Ok(count)
+}
+
+fn fix_math_in_dir(dir: &Path) -> anyhow::Result<usize> {
+    let mut count = 0;
+    let entries = fs::read_dir(dir)?;
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if p.is_dir() {
+            count += fix_math_in_dir(&p)?;
+        } else if p.is_file()
+            && p.extension().map_or(false, |ext| ext.eq_ignore_ascii_case("md"))
+            && fix_math_in_file(&p)?
+        {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+fn fix_math_in_file(file: &Path) -> anyhow::Result<bool> {
+    let content = fs::read_to_string(file)?;
+    let normalized = crate::markdown::normalize_latex_delimiters(&content);
+    if normalized != content {
+        fs::write(file, normalized)?;
+        println!("✓ Normalized math formatting: {}", file.display());
+        Ok(true)
+    } else {
+        Ok(false)
     }
 }
