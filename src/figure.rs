@@ -357,9 +357,7 @@ fn detect_figures_with_qwen(
         request = request.header("Authorization", format!("Bearer {api_key}"));
     }
 
-    let response = request
-        .send()
-        .with_context(|| format!("failed to send detection request to {endpoint}"))?;
+    let response = crate::backends::qwen::send_with_reconnect_retry(&request, &endpoint)?;
 
     let status = response.status();
     let body = response

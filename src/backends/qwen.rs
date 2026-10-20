@@ -221,6 +221,35 @@ pub fn create_http_client() -> reqwest::blocking::Client {
         .unwrap_or_else(|_| reqwest::blocking::Client::new())
 }
 
+/// Sends an HTTP request with automatic reconnection retries if the server is restarting/unreachable.
+pub fn send_with_reconnect_retry(
+    request: &reqwest::blocking::RequestBuilder,
+    endpoint: &str,
+) -> Result<reqwest::blocking::Response> {
+    const MAX_CONNECT_RETRIES: usize = 12;
+    let mut retry = 0;
+    loop {
+        let req_clone = request
+            .try_clone()
+            .context("failed to clone HTTP request for reconnect retry")?;
+        match req_clone.send() {
+            Ok(resp) => return Ok(resp),
+            Err(err) if err.is_connect() && retry < MAX_CONNECT_RETRIES => {
+                retry += 1;
+                eprintln!(
+                    "Notice: Connection to local Qwen endpoint failed ({err}). Server may be restarting or reloading weights; waiting 10s (attempt {retry}/{MAX_CONNECT_RETRIES})..."
+                );
+                std::thread::sleep(Duration::from_secs(10));
+            }
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!("failed to send request to local Qwen endpoint {endpoint} (Make sure your local server is running, e.g. 'ollama serve')")
+                });
+            }
+        }
+    }
+}
+
 pub fn ocr_image_file(image_path: &Path) -> Result<String> {
     let bytes = fs::read(image_path).context("failed to read OCR image file")?;
     let image_base64 = STANDARD.encode(&bytes);
@@ -297,9 +326,7 @@ pub fn ocr_image_file(image_path: &Path) -> Result<String> {
                 request = request.header("Authorization", format!("Bearer {api_key}"));
             }
 
-            let response = request
-                .send()
-                .with_context(|| format!("failed to send request to local Qwen endpoint {ollama_endpoint} (Make sure your local server is running, e.g. 'ollama serve')"))?;
+            let response = send_with_reconnect_retry(&request, &ollama_endpoint)?;
 
             let status = response.status();
             let body = response
@@ -339,9 +366,7 @@ pub fn ocr_image_file(image_path: &Path) -> Result<String> {
                 request = request.header("Authorization", format!("Bearer {api_key}"));
             }
 
-            let response = request
-                .send()
-                .with_context(|| format!("failed to send request to local Qwen endpoint {openai_endpoint} (Make sure your local server is running, e.g. 'ollama serve' or vLLM)"))?;
+            let response = send_with_reconnect_retry(&request, &openai_endpoint)?;
 
             let status = response.status();
             let body = response
@@ -440,9 +465,7 @@ pub fn transcribe_text(text: &str) -> Result<String> {
             request = request.header("Authorization", format!("Bearer {api_key}"));
         }
 
-        let response = request.send().with_context(|| {
-            format!("failed to send text request to Qwen endpoint {ollama_endpoint}")
-        })?;
+        let response = send_with_reconnect_retry(&request, &ollama_endpoint)?;
 
         let status = response.status();
         let body = response.text().context("failed to read response body")?;
@@ -473,9 +496,7 @@ pub fn transcribe_text(text: &str) -> Result<String> {
             request = request.header("Authorization", format!("Bearer {api_key}"));
         }
 
-        let response = request.send().with_context(|| {
-            format!("failed to send text request to Qwen endpoint {openai_endpoint}")
-        })?;
+        let response = send_with_reconnect_retry(&request, &openai_endpoint)?;
 
         let status = response.status();
         let body = response.text().context("failed to read response body")?;
