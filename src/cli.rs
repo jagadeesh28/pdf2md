@@ -28,6 +28,7 @@ pub fn print_usage() {
     --no-mermaid             Disable Mermaid diagram conversion (preserves enhanced images only)
     --no-figure-enhancement  Disable Sauvola adaptive binarization / despeckle on figures
     --figure-model <model>   Override vision model for figure classification and Mermaid synthesis
+    --max-depth <depth>      Maximum subdirectory levels to search for PDF files (default: 3)
 
 Supported backends:
     qwen   - Locally deployed Qwen Coder (default, via Ollama/vLLM/OpenAI-compatible endpoint)
@@ -37,6 +38,7 @@ Supported backends:
 Environment variables:
     PDF2MD_BACKEND          Default OCR backend (default: qwen)
     PDF2MD_CONCURRENCY      Number of concurrent page workers (default: 2)
+    PDF2MD_MAX_DEPTH        Maximum directory depth for batch PDF search (default: 3)
     PDF2MD_NO_MERMAID       Set to 1 to disable Mermaid diagram conversion
     PDF2MD_NO_ENHANCE       Set to 1 to disable figure image enhancement
     PDF2MD_FIGURE_MODEL     Override vision model for figure analysis
@@ -140,6 +142,26 @@ pub fn run() {
         } else if let Some(val) = arg.strip_prefix("--figure-model=") {
             unsafe {
                 env::set_var("PDF2MD_FIGURE_MODEL", val);
+            }
+            i += 1;
+        } else if arg == "--max-depth" || arg == "--depth" {
+            if i + 1 >= raw_args.len() {
+                eprintln!("Error: Flag '{arg}' requires an integer depth argument");
+                print_usage();
+                process::exit(1);
+            }
+            unsafe {
+                env::set_var("PDF2MD_MAX_DEPTH", &raw_args[i + 1]);
+            }
+            i += 2;
+        } else if let Some(val) = arg.strip_prefix("--max-depth=") {
+            unsafe {
+                env::set_var("PDF2MD_MAX_DEPTH", val);
+            }
+            i += 1;
+        } else if let Some(val) = arg.strip_prefix("--depth=") {
+            unsafe {
+                env::set_var("PDF2MD_MAX_DEPTH", val);
             }
             i += 1;
         } else {

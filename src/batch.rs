@@ -28,23 +28,80 @@ pub fn sanitize_folder_name(name: &str) -> String {
     }
 }
 
-/// Collects all PDF files (`.pdf`, case-insensitive) in a directory, sorted by name.
-pub fn collect_pdf_files(dir: &Path) -> Result<Vec<PathBuf>> {
-    let mut pdfs = Vec::new();
-    let entries =
-        fs::read_dir(dir).with_context(|| format!("failed to read directory {}", dir.display()))?;
-    for entry in entries {
-        let entry = entry.with_context(|| format!("failed to read entry in {}", dir.display()))?;
-        let path = entry.path();
-        if path.is_file()
-            && let Some(ext) = path.extension()
-            && ext.eq_ignore_ascii_case("pdf")
-        {
-            pdfs.push(path);
-        }
+/// Default directory search depth for PDF batch conversion (searches root and up to 3 nested subdirectory levels).
+pub const DEFAULT_MAX_SEARCH_DEPTH: usize = 3;
+
+/// Resolves maximum directory depth for recursive PDF search from `PDF2MD_MAX_DEPTH` (default: 3).
+pub fn resolve_max_search_depth() -> usize {
+    if let Ok(val) = std::env::var("PDF2MD_MAX_DEPTH")
+        && let Ok(parsed) = val.parse::<usize>()
+    {
+        return parsed;
     }
+    DEFAULT_MAX_SEARCH_DEPTH
+}
+
+/// Collects all PDF files (`.pdf`, case-insensitive) in a directory searching up to `max_depth` directory levels, sorted by name.
+pub fn collect_pdf_files_with_depth(dir: &Path, max_depth: usize) -> Result<Vec<PathBuf>> {
+    if !dir.exists() {
+        return Err(anyhow!("Directory '{}' does not exist", dir.display()));
+    }
+    let mut pdfs = Vec::new();
+    collect_pdf_files_recursive(dir, 0, max_depth, &mut pdfs)?;
     pdfs.sort();
     Ok(pdfs)
+}
+
+/// Collects all PDF files (`.pdf`, case-insensitive) in a directory searching at least 3 levels of directories, sorted by name.
+pub fn collect_pdf_files(dir: &Path) -> Result<Vec<PathBuf>> {
+    let max_depth = resolve_max_search_depth();
+    collect_pdf_files_with_depth(dir, max_depth)
+}
+
+fn collect_pdf_files_recursive(
+    current_dir: &Path,
+    current_depth: usize,
+    max_depth: usize,
+    collected: &mut Vec<PathBuf>,
+) -> Result<()> {
+    let entries = match fs::read_dir(current_dir) {
+        Ok(entries) => entries,
+        Err(err) => {
+            eprintln!(
+                "Warning: could not read directory '{}': {err}",
+                current_dir.display()
+            );
+            return Ok(());
+        }
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let file_type = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(_) => continue,
+        };
+
+        if file_type.is_file() {
+            if let Some(ext) = path.extension()
+                && ext.eq_ignore_ascii_case("pdf")
+            {
+                collected.push(path);
+            }
+        } else if file_type.is_dir() && current_depth < max_depth {
+            // Ignore hidden directories (e.g., .git, .obsidian, .trash)
+            let is_hidden = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|name| name.starts_with('.'));
+
+            if !is_hidden {
+                collect_pdf_files_recursive(&path, current_depth + 1, max_depth, collected)?;
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Finds a unique folder path inside `base_dir` for the given `folder_name`.
@@ -283,5 +340,64 @@ mod tests {
                     .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))
             }));
         }
+    }
+
+    #[test]
+    fn test_collect_pdf_files_recursive_three_levels() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+
+        // Level 0
+        fs::write(root.join("root.pdf"), b"%PDF-1.4").unwrap();
+        fs::write(root.join("ignored.txt"), b"not a pdf").unwrap();
+
+        // Level 1
+        let l1 = root.join("level1");
+        fs::create_dir_all(&l1).unwrap();
+        fs::write(l1.join("doc1.pdf"), b"%PDF-1.4").unwrap();
+
+        // Level 2
+        let l2 = l1.join("level2");
+        fs::create_dir_all(&l2).unwrap();
+        fs::write(l2.join("doc2.pdf"), b"%PDF-1.4").unwrap();
+
+        // Level 3
+        let l3 = l2.join("level3");
+        fs::create_dir_all(&l3).unwrap();
+        fs::write(l3.join("doc3.PDF"), b"%PDF-1.4").unwrap();
+
+        // Level 4 (should be excluded when max_depth is 3)
+        let l4 = l3.join("level4");
+        fs::create_dir_all(&l4).unwrap();
+        fs::write(l4.join("doc4.pdf"), b"%PDF-1.4").unwrap();
+
+        // Hidden directory at level 1 (should be excluded)
+        let hidden = root.join(".git");
+        fs::create_dir_all(&hidden).unwrap();
+        fs::write(hidden.join("hidden.pdf"), b"%PDF-1.4").unwrap();
+
+        // Test default depth (3 levels)
+        let files_default = collect_pdf_files(root).unwrap();
+        let file_names: Vec<String> = files_default
+            .iter()
+            .map(|f| f.file_name().unwrap().to_str().unwrap().to_string())
+            .collect();
+
+        assert!(file_names.contains(&"root.pdf".to_string()));
+        assert!(file_names.contains(&"doc1.pdf".to_string()));
+        assert!(file_names.contains(&"doc2.pdf".to_string()));
+        assert!(file_names.contains(&"doc3.PDF".to_string()));
+        assert!(!file_names.contains(&"doc4.pdf".to_string()));
+        assert!(!file_names.contains(&"hidden.pdf".to_string()));
+        assert!(!file_names.contains(&"ignored.txt".to_string()));
+        assert_eq!(files_default.len(), 4);
+
+        // Test custom depth 4 (should include level 4)
+        let files_depth4 = collect_pdf_files_with_depth(root, 4).unwrap();
+        assert_eq!(files_depth4.len(), 5);
+
+        // Test custom depth 1 (only root and level 1)
+        let files_depth1 = collect_pdf_files_with_depth(root, 1).unwrap();
+        assert_eq!(files_depth1.len(), 2);
     }
 }

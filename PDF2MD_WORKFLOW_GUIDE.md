@@ -84,6 +84,12 @@ export QWEN_MODEL="qwen2.5-coder:latest"
 # Default: Qwen Coder (Local)
 cargo run --release -- input/your_document.pdf output/document.md 1 5
 
+# Batch conversion (searches input directory up to 3 levels of subdirectories by default):
+cargo run --release -- input/ output/
+
+# Batch conversion with custom directory depth (e.g. 4 levels):
+cargo run --release -- --max-depth 4 input/ output/
+
 # Alternative: Google Gemini
 export GEMINI_API_KEY="your_api_key_here"
 cargo run --release -- input/your_document.pdf output/document.md 1 5 gemini

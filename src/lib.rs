@@ -17,8 +17,9 @@ pub use backends::qwen;
 // Public API re-exports
 pub use backends::{OcrBackend, resolve_default_backend};
 pub use batch::{
-    BatchConversionResult, collect_pdf_files, process_pdf_directory, resolve_unique_output_dir,
-    sanitize_folder_name,
+    BatchConversionResult, DEFAULT_MAX_SEARCH_DEPTH, collect_pdf_files,
+    collect_pdf_files_with_depth, process_pdf_directory, resolve_max_search_depth,
+    resolve_unique_output_dir, sanitize_folder_name,
 };
 pub use fallback::get_pdf_page_count;
 pub use markdown::{
