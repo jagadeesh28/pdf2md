@@ -81,6 +81,16 @@ impl CroppedFigure {
             mermaid_code: None,
         }
     }
+
+    /// Returns the name of the folder containing this figure image, defaulting to "images".
+    pub fn images_dir_name(&self) -> &str {
+        self.file_path
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|s| s.to_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("images")
+    }
 }
 
 #[derive(Debug, Serialize)]

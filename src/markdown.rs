@@ -45,19 +45,21 @@ pub fn render_markdown(result: &PdfExtractionResult) -> String {
                 }
                 _ => fig.figure_label.clone(),
             };
+            let dir_name = fig.images_dir_name();
             if let Some(ref mermaid) = fig.mermaid_code {
                 output.push_str(&format!(
-                    "{}\n> [!figure]- Original Enhanced Image: {}\n> ![{}](images/{})\n> *{}*\n\n",
+                    "{}\n> [!figure]- Original Enhanced Image: {}\n> ![{}]({}/{})\n> *{}*\n\n",
                     mermaid.trim(),
                     fig.figure_label,
                     fig.figure_label,
+                    dir_name,
                     fig.filename,
                     caption_text
                 ));
             } else {
                 output.push_str(&format!(
-                    "![{}](images/{})\n*{}*\n\n",
-                    fig.figure_label, fig.filename, caption_text
+                    "![{}]({}/{})\n*{}*\n\n",
+                    fig.figure_label, dir_name, fig.filename, caption_text
                 ));
             }
         }
@@ -84,7 +86,8 @@ pub fn attach_figures_to_page_text(page_text: &str, figures: &[CroppedFigure]) -
     let mut result = page_text.to_string();
 
     for fig in figures {
-        let image_link = format!("![{}](images/{})", fig.figure_label, fig.filename);
+        let dir_name = fig.images_dir_name();
+        let image_link = format!("![{}]({dir_name}/{})", fig.figure_label, fig.filename);
         if result.contains(&image_link) || result.contains(&fig.filename) {
             continue;
         }
@@ -437,6 +440,31 @@ mod tests {
         assert!(attached.contains("> [!figure]- Original Enhanced Image: Figure 1"));
         assert!(attached.contains("![Figure 1](images/Figure-1.png)"));
         assert!(attached.contains("*Figure 1. Process Flow*"));
+    }
+
+    #[test]
+    fn test_figures_with_pdfname_images_folder() {
+        let figures = vec![CroppedFigure {
+            figure_label: "Figure 2.3".to_string(),
+            caption: Some("Nozzle Geometry".to_string()),
+            filename: "Figure-2-3.png".to_string(),
+            file_path: PathBuf::from("output/propulsion_report_images/Figure-2-3.png"),
+            mermaid_code: None,
+        }];
+
+        assert_eq!(figures[0].images_dir_name(), "propulsion_report_images");
+
+        let page_text = "Refer to Figure 2.3 for contour details.";
+        let attached = attach_figures_to_page_text(page_text, &figures);
+        assert!(attached.contains("![Figure 2.3](propulsion_report_images/Figure-2-3.png)"));
+
+        let result = PdfExtractionResult {
+            text: String::new(),
+            images: vec![],
+            figures,
+        };
+        let rendered = render_markdown(&result);
+        assert!(rendered.contains("![Figure 2.3](propulsion_report_images/Figure-2-3.png)"));
     }
 
     #[test]

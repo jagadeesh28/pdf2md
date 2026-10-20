@@ -43,10 +43,15 @@ pub fn process_pdf_with_backend(
 ) -> Result<()> {
     validate_page_range(begin_page, end_page)?;
 
+    let pdf_stem = input_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("document");
+    let images_folder_name = format!("{pdf_stem}_images");
     let image_output_dir = output_path
         .parent()
         .unwrap_or_else(|| Path::new("."))
-        .join("images");
+        .join(&images_folder_name);
     let output_dir = output_path.parent().unwrap_or_else(|| Path::new("."));
 
     fs::create_dir_all(output_dir)

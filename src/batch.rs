@@ -197,7 +197,15 @@ pub fn process_pdf_directory(
             total_pages,
             pdf_output_dir.display(),
             target_md_path.display(),
-            pdf_output_dir.join("images").display()
+            pdf_output_dir
+                .join(format!(
+                    "{}_images",
+                    pdf_path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or(&folder_name)
+                ))
+                .display()
         );
 
         match process_pdf_with_backend(pdf_path, &target_md_path, begin_page, end_page, backend) {
