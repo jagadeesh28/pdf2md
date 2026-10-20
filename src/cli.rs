@@ -24,19 +24,27 @@ pub fn print_usage() {
     # With backend flag:
     pdf2md --backend <backend> <input-path> <output-path> [begin-page] [end-page]
 
+    # Figure enhancement and diagram options:
+    --no-mermaid             Disable Mermaid diagram conversion (preserves enhanced images only)
+    --no-figure-enhancement  Disable Sauvola adaptive binarization / despeckle on figures
+    --figure-model <model>   Override vision model for figure classification and Mermaid synthesis
+
 Supported backends:
     qwen   - Locally deployed Qwen Coder (default, via Ollama/vLLM/OpenAI-compatible endpoint)
     gemini - Google Gemini API (requires GEMINI_API_KEY)
     gemma  - Google Gemma API (requires GEMMA_API_KEY or GEMINI_API_KEY)
 
 Environment variables:
-    PDF2MD_BACKEND      Default OCR backend (default: qwen)
-    PDF2MD_CONCURRENCY  Number of concurrent page workers (default: 2)
-    QWEN_URL            Local Qwen endpoint URL (default: http://localhost:11434/v1)
-    QWEN_MODEL          Model name (default: qwen2.5-coder:latest)
-    QWEN_API_KEY        Optional API key for local endpoint
-    GEMINI_API_KEY      Gemini API key
-    GEMMA_API_KEY       Gemma API key
+    PDF2MD_BACKEND          Default OCR backend (default: qwen)
+    PDF2MD_CONCURRENCY      Number of concurrent page workers (default: 2)
+    PDF2MD_NO_MERMAID       Set to 1 to disable Mermaid diagram conversion
+    PDF2MD_NO_ENHANCE       Set to 1 to disable figure image enhancement
+    PDF2MD_FIGURE_MODEL     Override vision model for figure analysis
+    QWEN_URL                Local Qwen endpoint URL (default: http://localhost:11434/v1)
+    QWEN_MODEL              Model name (default: qwen2.5-coder:latest)
+    QWEN_API_KEY            Optional API key for local endpoint
+    GEMINI_API_KEY          Gemini API key
+    GEMMA_API_KEY           Gemma API key
 "#
     );
 }
@@ -108,6 +116,31 @@ pub fn run() {
                     process::exit(1);
                 }
             };
+            i += 1;
+        } else if arg == "--no-mermaid" {
+            unsafe {
+                env::set_var("PDF2MD_NO_MERMAID", "1");
+            }
+            i += 1;
+        } else if arg == "--no-figure-enhancement" || arg == "--no-enhance" {
+            unsafe {
+                env::set_var("PDF2MD_NO_ENHANCE", "1");
+            }
+            i += 1;
+        } else if arg == "--figure-model" {
+            if i + 1 >= raw_args.len() {
+                eprintln!("Error: Flag '--figure-model' requires a model name argument");
+                print_usage();
+                process::exit(1);
+            }
+            unsafe {
+                env::set_var("PDF2MD_FIGURE_MODEL", &raw_args[i + 1]);
+            }
+            i += 2;
+        } else if let Some(val) = arg.strip_prefix("--figure-model=") {
+            unsafe {
+                env::set_var("PDF2MD_FIGURE_MODEL", val);
+            }
             i += 1;
         } else {
             positional_args.push(arg.clone());

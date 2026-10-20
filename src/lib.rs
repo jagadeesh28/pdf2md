@@ -3,9 +3,11 @@ pub mod batch;
 pub mod cli;
 pub mod fallback;
 pub mod figure;
+pub mod figure_analysis;
 pub mod markdown;
 pub mod pdf;
 pub mod pipeline;
+pub mod preprocess;
 
 // Backwards-compatible module re-exports
 pub use backends::gemini;

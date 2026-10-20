@@ -45,10 +45,21 @@ pub fn render_markdown(result: &PdfExtractionResult) -> String {
                 }
                 _ => fig.figure_label.clone(),
             };
-            output.push_str(&format!(
-                "![{}](images/{})\n*{}*\n\n",
-                fig.figure_label, fig.filename, caption_text
-            ));
+            if let Some(ref mermaid) = fig.mermaid_code {
+                output.push_str(&format!(
+                    "{}\n> [!figure]- Original Enhanced Image: {}\n> ![{}](images/{})\n> *{}*\n\n",
+                    mermaid.trim(),
+                    fig.figure_label,
+                    fig.figure_label,
+                    fig.filename,
+                    caption_text
+                ));
+            } else {
+                output.push_str(&format!(
+                    "![{}](images/{})\n*{}*\n\n",
+                    fig.figure_label, fig.filename, caption_text
+                ));
+            }
         }
     } else if !result.images.is_empty() {
         if !output.is_empty() {
@@ -92,12 +103,24 @@ pub fn attach_figures_to_page_text(page_text: &str, figures: &[CroppedFigure]) -
             _ => fig.figure_label.clone(),
         };
 
+        let figure_block = if let Some(ref mermaid) = fig.mermaid_code {
+            format!(
+                "{}\n> [!figure]- Original Enhanced Image: {}\n> {}\n> *{}*\n\n",
+                mermaid.trim(),
+                fig.figure_label,
+                image_link,
+                caption_text
+            )
+        } else {
+            format!("{image_link}\n\n")
+        };
+
         let lower_text = result.to_lowercase();
         let lower_label = fig.figure_label.to_lowercase();
 
         if let Some(pos) = lower_text.find(&lower_label) {
             let line_start = result[..pos].rfind('\n').map(|i| i + 1).unwrap_or(0);
-            result.insert_str(line_start, &format!("{image_link}\n\n"));
+            result.insert_str(line_start, &figure_block);
         } else {
             if !result.is_empty() && !result.ends_with("\n\n") {
                 if result.ends_with('\n') {
@@ -106,7 +129,17 @@ pub fn attach_figures_to_page_text(page_text: &str, figures: &[CroppedFigure]) -
                     result.push_str("\n\n");
                 }
             }
-            result.push_str(&format!("{image_link}\n\n*{caption_text}*\n\n"));
+            if let Some(ref mermaid) = fig.mermaid_code {
+                result.push_str(&format!(
+                    "{}\n> [!figure]- Original Enhanced Image: {}\n> {}\n> *{}*\n\n",
+                    mermaid.trim(),
+                    fig.figure_label,
+                    image_link,
+                    caption_text
+                ));
+            } else {
+                result.push_str(&format!("{image_link}\n\n*{caption_text}*\n\n"));
+            }
         }
     }
 
@@ -306,6 +339,7 @@ mod tests {
                 caption: None,
                 filename: "Figure-VII-3.png".to_string(),
                 file_path: PathBuf::from("output/images/Figure-VII-3.png"),
+                mermaid_code: None,
             }],
         };
 
@@ -325,6 +359,7 @@ mod tests {
                 caption: Some("Variation of species mole fractions with distance.".to_string()),
                 filename: "Figure-4-7.png".to_string(),
                 file_path: PathBuf::from("output/images/Figure-4-7.png"),
+                mermaid_code: None,
             }],
         };
 
@@ -337,12 +372,34 @@ mod tests {
     }
 
     #[test]
+    fn renders_figures_with_mermaid_diagram() {
+        let result = PdfExtractionResult {
+            text: String::new(),
+            images: vec![],
+            figures: vec![CroppedFigure {
+                figure_label: "Figure 3.1".to_string(),
+                caption: Some("Fuel Feed System Schematic".to_string()),
+                filename: "Figure-3-1.png".to_string(),
+                file_path: PathBuf::from("output/images/Figure-3-1.png"),
+                mermaid_code: Some("```mermaid\ngraph LR\n    Tank --> Pump\n```".to_string()),
+            }],
+        };
+
+        let output = render_markdown(&result);
+        assert!(output.contains("```mermaid\ngraph LR\n    Tank --> Pump\n```"));
+        assert!(output.contains("> [!figure]- Original Enhanced Image: Figure 3.1"));
+        assert!(output.contains("![Figure 3.1](images/Figure-3-1.png)"));
+        assert!(output.contains("*Figure 3.1. Fuel Feed System Schematic*"));
+    }
+
+    #[test]
     fn test_attach_figures_to_page_text() {
         let figures = vec![CroppedFigure {
             figure_label: "Figure 4.7".to_string(),
             caption: Some("Variation of species mole fractions with distance.".to_string()),
             filename: "Figure-4-7.png".to_string(),
             file_path: PathBuf::from("output/images/Figure-4-7.png"),
+            mermaid_code: None,
         }];
 
         // Case 1: Figure label is present in page text
@@ -362,6 +419,24 @@ mod tests {
         assert!(
             attached2.contains("*Figure 4.7. Variation of species mole fractions with distance.*")
         );
+    }
+
+    #[test]
+    fn test_attach_figures_with_mermaid() {
+        let figures = vec![CroppedFigure {
+            figure_label: "Figure 1".to_string(),
+            caption: Some("Process Flow".to_string()),
+            filename: "Figure-1.png".to_string(),
+            file_path: PathBuf::from("output/images/Figure-1.png"),
+            mermaid_code: Some("```mermaid\ngraph TD\n    A --> B\n```".to_string()),
+        }];
+
+        let page_text = "Here is Figure 1 describing the workflow.";
+        let attached = attach_figures_to_page_text(page_text, &figures);
+        assert!(attached.contains("```mermaid\ngraph TD\n    A --> B\n```"));
+        assert!(attached.contains("> [!figure]- Original Enhanced Image: Figure 1"));
+        assert!(attached.contains("![Figure 1](images/Figure-1.png)"));
+        assert!(attached.contains("*Figure 1. Process Flow*"));
     }
 
     #[test]

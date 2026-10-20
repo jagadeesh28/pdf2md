@@ -177,12 +177,22 @@ pub fn ocr_image_file(api_key: &str, image_path: &Path) -> Result<String> {
     Ok(cleaned)
 }
 
-pub fn detect_figures(api_key: &str, image_path: &Path, prompt: &str) -> Result<String> {
+pub fn query_vision(
+    api_key: &str,
+    image_path: &Path,
+    prompt: &str,
+    model_override: Option<&str>,
+) -> Result<String> {
     let bytes =
-        fs::read(image_path).context("failed to read image file for Gemma figure detection")?;
+        fs::read(image_path).context("failed to read image file for Gemma vision request")?;
     let image_base64 = STANDARD.encode(&bytes);
 
-    let model = std::env::var("GEMMA_MODEL").unwrap_or_else(|_| "gemma-4-26b-a4b-it".to_string());
+    let model = model_override
+        .filter(|m| !m.trim().is_empty())
+        .map(|m| m.to_string())
+        .unwrap_or_else(|| {
+            std::env::var("GEMMA_MODEL").unwrap_or_else(|_| "gemma-4-26b-a4b-it".to_string())
+        });
 
     let payload = GeminiRequest {
         contents: vec![Content {
@@ -214,19 +224,19 @@ pub fn detect_figures(api_key: &str, image_path: &Path, prompt: &str) -> Result<
         .post(&endpoint)
         .json(&payload)
         .send()
-        .context("Gemma figure detection request failed")?;
+        .context("Gemma vision request failed")?;
 
     let status = response.status();
     let response_text = response
         .text()
-        .context("failed to read Gemma figure detection response body")?;
+        .context("failed to read Gemma vision response body")?;
 
     if !status.is_success() {
-        bail!("Gemma figure detection returned HTTP {status}: {response_text}");
+        bail!("Gemma vision returned HTTP {status}: {response_text}");
     }
 
     let parsed: GeminiResponse = serde_json::from_str(&response_text)
-        .context("failed to parse Gemma figure detection response JSON")?;
+        .context("failed to parse Gemma vision response JSON")?;
 
     let raw_text = parsed
         .candidates
@@ -243,4 +253,8 @@ pub fn detect_figures(api_key: &str, image_path: &Path, prompt: &str) -> Result<
         .join("\n");
 
     Ok(raw_text)
+}
+
+pub fn detect_figures(api_key: &str, image_path: &Path, prompt: &str) -> Result<String> {
+    query_vision(api_key, image_path, prompt, None)
 }

@@ -589,6 +589,112 @@ pub fn clean_model_markdown(raw_text: &str) -> String {
     crate::markdown::normalize_latex_delimiters(&stripped)
 }
 
+pub fn query_vision(
+    image_path: &Path,
+    prompt: &str,
+    model_override: Option<&str>,
+) -> Result<String> {
+    let bytes = fs::read(image_path).context("failed to read image file for Qwen vision query")?;
+    let image_base64 = STANDARD.encode(&bytes);
+
+    let base_url = std::env::var("QWEN_URL")
+        .or_else(|_| std::env::var("QWEN_API_BASE"))
+        .or_else(|_| std::env::var("LOCAL_LLM_URL"))
+        .unwrap_or_else(|_| "http://localhost:11434/v1".to_string());
+
+    let client = create_http_client();
+    let model = model_override
+        .filter(|m| !m.trim().is_empty())
+        .map(|m| m.to_string())
+        .unwrap_or_else(|| resolve_model_name(&client, &base_url));
+    let api_key = std::env::var("QWEN_API_KEY").unwrap_or_default();
+
+    let is_ollama = is_ollama_endpoint(&base_url);
+    let ollama_endpoint = normalize_ollama_chat_url(&base_url);
+    let openai_endpoint = normalize_chat_completions_url(&base_url);
+
+    let (status, body) = if is_ollama {
+        let payload = OllamaChatRequest {
+            model: model.clone(),
+            messages: vec![OllamaMessage {
+                role: "user".to_string(),
+                content: prompt.to_string(),
+                images: vec![image_base64],
+            }],
+            stream: false,
+            options: Some(OllamaOptions {
+                temperature: Some(0.0),
+                repeat_penalty: Some(1.1),
+                repeat_last_n: Some(64),
+                stop: None,
+            }),
+        };
+
+        let response = client
+            .post(&ollama_endpoint)
+            .json(&payload)
+            .send()
+            .context("failed to send Ollama vision request")?;
+        let status = response.status();
+        let body = response
+            .text()
+            .context("failed to read Ollama response body")?;
+        (status, body)
+    } else {
+        let payload = OpenAiChatRequest {
+            model: model.clone(),
+            messages: vec![OpenAiMessage {
+                role: "user".to_string(),
+                content: MessageContent::Parts(vec![
+                    ContentPart::Text {
+                        text: prompt.to_string(),
+                    },
+                    ContentPart::ImageUrl {
+                        image_url: ImageUrlObject {
+                            url: format!("data:image/png;base64,{image_base64}"),
+                        },
+                    },
+                ]),
+            }],
+            temperature: Some(0.0),
+            presence_penalty: None,
+            frequency_penalty: None,
+            stop: None,
+        };
+
+        let mut request = client.post(&openai_endpoint).json(&payload);
+        if !api_key.is_empty() {
+            request = request.header("Authorization", format!("Bearer {api_key}"));
+        }
+
+        let response = send_with_reconnect_retry(&request, &openai_endpoint)?;
+        let status = response.status();
+        let body = response
+            .text()
+            .context("failed to read Qwen vision response body")?;
+        (status, body)
+    };
+
+    if !status.is_success() {
+        handle_api_error(status, &body, &model)?;
+    }
+
+    let parsed: UnifiedChatResponse = serde_json::from_str(&body)
+        .with_context(|| format!("failed to parse Qwen JSON response: {body}"))?;
+
+    let raw_text = if is_ollama {
+        parsed
+            .message
+            .and_then(|m| m.content)
+            .or(parsed.response)
+            .unwrap_or_default()
+    } else {
+        extract_content_from_response(&parsed).unwrap_or_else(|| body.clone())
+    };
+
+    Ok(raw_text)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

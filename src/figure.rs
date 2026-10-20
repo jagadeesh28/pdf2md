@@ -63,6 +63,24 @@ pub struct CroppedFigure {
     pub caption: Option<String>,
     pub filename: String,
     pub file_path: PathBuf,
+    pub mermaid_code: Option<String>,
+}
+
+impl CroppedFigure {
+    pub fn new(
+        figure_label: String,
+        caption: Option<String>,
+        filename: String,
+        file_path: PathBuf,
+    ) -> Self {
+        Self {
+            figure_label,
+            caption,
+            filename,
+            file_path,
+            mermaid_code: None,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -304,7 +322,18 @@ pub fn detect_and_crop_figures(
             caption: det.caption.clone(),
             filename,
             file_path: figure_path,
+            mermaid_code: None,
         });
+    }
+
+    // Extra layer: enhance figure images and convert convertible schematics/flowcharts to Mermaid diagrams
+    for fig in &mut cropped_figures {
+        if let Err(e) = crate::figure_analysis::analyze_and_enhance_figure(backend, fig) {
+            eprintln!(
+                "Notice: Figure analysis / enhancement skipped for '{}': {e:#}",
+                fig.figure_label
+            );
+        }
     }
 
     Ok(cropped_figures)
