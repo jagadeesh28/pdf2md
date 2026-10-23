@@ -37,7 +37,7 @@ pub enum BoundingBoxCoords {
 }
 
 impl BoundingBoxCoords {
-    /// Returns coordinates as `(xmin, ymin, xmax, ymax)`.
+    /// Returns coordinates as `(xmin, ymin, xmax, ymax)` for Qwen format.
     pub fn to_coords(&self) -> Option<(f32, f32, f32, f32)> {
         match self {
             BoundingBoxCoords::Array(arr) => {
@@ -53,6 +53,25 @@ impl BoundingBoxCoords {
                 ymax,
                 xmax,
             } => Some((*xmin, *ymin, *xmax, *ymax)),
+        }
+    }
+
+    /// Returns coordinates as `(ymin, xmin, ymax, xmax)` for Gemini/Gemma format.
+    pub fn to_gemini_coords(&self) -> Option<(f32, f32, f32, f32)> {
+        match self {
+            BoundingBoxCoords::Array(arr) => {
+                if arr.len() < 4 {
+                    None
+                } else {
+                    Some((arr[0], arr[1], arr[2], arr[3]))
+                }
+            }
+            BoundingBoxCoords::Map {
+                ymin,
+                xmin,
+                ymax,
+                xmax,
+            } => Some((*ymin, *xmin, *ymax, *xmax)),
         }
     }
 }
@@ -176,6 +195,41 @@ CRITICAL EXTRACTION RULES:
     )
 }
 
+fn gemini_figure_detection_prompt(img_w: u32, img_h: u32) -> String {
+    format!(
+        r#"You are an expert document vision analyzer.
+Your task is to detect ONLY actual, non-convertible visual figures and graphics on this page (such as plots, charts, graphs, flowcharts, schematics, engineering drawings, diagrams, and photos).
+
+IMAGE CANVAS DIMENSIONS:
+- Width: {img_w} pixels
+- Height: {img_h} pixels
+
+CRITICAL EXTRACTION RULES:
+1. ONLY NON-CONVERTIBLE VISUAL GRAPHICS:
+   - Crop ONLY actual visual drawings, charts, schematics, and plots that CANNOT be represented as Markdown text or Markdown tables.
+   - STRICTLY FORBIDDEN: NEVER detect or crop text paragraphs, tables of contents, "List of Figures" index pages, bibliographies, or plain textual listings. If a page only contains text or a list of figure titles, return an empty array [].
+2. INCLUDE BOTH THE GRAPHIC AND THE FULL FIGURE NUMBER AND CAPTION IN THE CROPPED BOX:
+   - The bounding box must enclose BOTH the visual graphic (plot/drawing/chart) AND its complete figure number and caption (e.g., "Figure 4.5.—Variation of species mole fractions...").
+   - ymin MUST enclose the uppermost part: if the caption/title is at the top above the graphic, ymin MUST be the top of the caption/title; if the graphic is at the top, ymin MUST be the top of the graphic canvas, top border line, axis labels, or curve peaks. Do NOT clip the top border line, curve peaks, or top labels.
+   - ymax MUST enclose the lowermost part: if the caption is at the bottom, ymax MUST be below the last line of the figure caption text; if the graphic extends lower, ymax MUST be the bottom of the graphic.
+   - The resulting cropped image MUST contain both the visual graphic and the readable figure number & caption text.
+   - STOP IMMEDIATELY after the figure caption. Do NOT include any body paragraphs, explanatory text, or section headings below or above the figure!
+3. EXACT BOUNDARIES & COORDINATES:
+   - "box_2d": Provide the 2D bounding box as [ymin, xmin, ymax, xmax] normalized to 0-1000 (integers between 0 and 1000, where [0, 0] is top-left and [1000, 1000] is bottom-right).
+   - In multi-column layouts, do NOT bleed into adjacent text columns.
+4. Output format: Return ONLY a valid JSON array of objects in this exact schema:
+[
+  {{
+    "figure_number": "Figure 4.7",
+    "caption": "Variation of species mole fractions with distance for shock tube problem.",
+    "box_2d": [ymin, xmin, ymax, xmax]
+  }}
+]
+- If no actual visual drawings, plots, or diagrams exist on this page, return []
+- Return ONLY raw JSON without markdown fences or commentary."#
+    )
+}
+
 /// Detects figures on a document page image using the active backend vision model,
 /// refines boundaries tightly, and crops each into output_dir without overwriting existing files.
 pub fn detect_and_crop_figures(
@@ -259,35 +313,74 @@ pub fn detect_and_crop_figures(
     let mut cropped_figures = Vec::new();
 
     for (idx, det) in detections.into_iter().enumerate() {
-        let (mut xmin, mut ymin, mut xmax, mut ymax) = match det.box_2d.to_coords() {
-            Some(coords) => coords,
-            None => continue,
-        };
+        let (px_x, px_y, px_w, px_h) = match backend {
+            crate::backends::OcrBackend::Qwen => {
+                let (mut xmin, mut ymin, mut xmax, mut ymax) = match det.box_2d.to_coords() {
+                    Some(coords) => coords,
+                    None => continue,
+                };
 
-        // Ensure proper ordering if inverted
-        if xmin > xmax {
-            std::mem::swap(&mut xmin, &mut xmax);
-        }
-        if ymin > ymax {
-            std::mem::swap(&mut ymin, &mut ymax);
-        }
+                // Ensure proper ordering if inverted
+                if xmin > xmax {
+                    std::mem::swap(&mut xmin, &mut xmax);
+                }
+                if ymin > ymax {
+                    std::mem::swap(&mut ymin, &mut ymax);
+                }
 
-        // Determine coordinate scale:
-        // - 0.0..1.0 normalized
-        // - Direct pixel coordinates on img_w x img_h canvas
-        let (px_x, px_y, px_w, px_h) = if ymax <= 1.0 && xmax <= 1.0 && (ymax > 0.0 || xmax > 0.0) {
-            let x = ((xmin * img_w as f32).clamp(0.0, img_w as f32)) as u32;
-            let y = ((ymin * img_h as f32).clamp(0.0, img_h as f32)) as u32;
-            let w = (((xmax - xmin) * img_w as f32).max(0.0) as u32).min(img_w.saturating_sub(x));
-            let h = (((ymax - ymin) * img_h as f32).max(0.0) as u32).min(img_h.saturating_sub(y));
-            (x, y, w, h)
-        } else {
-            // Direct pixel coordinates
-            let x = (xmin.clamp(0.0, img_w as f32)) as u32;
-            let y = (ymin.clamp(0.0, img_h as f32)) as u32;
-            let w = ((xmax - xmin).max(0.0) as u32).min(img_w.saturating_sub(x));
-            let h = ((ymax - ymin).max(0.0) as u32).min(img_h.saturating_sub(y));
-            (x, y, w, h)
+                // Determine coordinate scale:
+                // - 0.0..1.0 normalized
+                // - Direct pixel coordinates on img_w x img_h canvas
+                if ymax <= 1.0 && xmax <= 1.0 && (ymax > 0.0 || xmax > 0.0) {
+                    let x = ((xmin * img_w as f32).clamp(0.0, img_w as f32)) as u32;
+                    let y = ((ymin * img_h as f32).clamp(0.0, img_h as f32)) as u32;
+                    let w = (((xmax - xmin) * img_w as f32).max(0.0) as u32).min(img_w.saturating_sub(x));
+                    let h = (((ymax - ymin) * img_h as f32).max(0.0) as u32).min(img_h.saturating_sub(y));
+                    (x, y, w, h)
+                } else {
+                    // Direct pixel coordinates
+                    let x = (xmin.clamp(0.0, img_w as f32)) as u32;
+                    let y = (ymin.clamp(0.0, img_h as f32)) as u32;
+                    let w = ((xmax - xmin).max(0.0) as u32).min(img_w.saturating_sub(x));
+                    let h = ((ymax - ymin).max(0.0) as u32).min(img_h.saturating_sub(y));
+                    (x, y, w, h)
+                }
+            }
+            crate::backends::OcrBackend::Gemini | crate::backends::OcrBackend::Gemma => {
+                let (mut ymin, mut xmin, mut ymax, mut xmax) = match det.box_2d.to_gemini_coords() {
+                    Some(coords) => coords,
+                    None => continue,
+                };
+
+                // Ensure proper ordering if inverted
+                if xmin > xmax {
+                    std::mem::swap(&mut xmin, &mut xmax);
+                }
+                if ymin > ymax {
+                    std::mem::swap(&mut ymin, &mut ymax);
+                }
+
+                // Gemini standard: [ymin, xmin, ymax, xmax] normalized to [0, 1000]
+                if ymax <= 1.0 && xmax <= 1.0 && (ymax > 0.0 || xmax > 0.0) {
+                    let x = ((xmin * img_w as f32).clamp(0.0, img_w as f32)) as u32;
+                    let y = ((ymin * img_h as f32).clamp(0.0, img_h as f32)) as u32;
+                    let w = (((xmax - xmin) * img_w as f32).max(0.0) as u32).min(img_w.saturating_sub(x));
+                    let h = (((ymax - ymin) * img_h as f32).max(0.0) as u32).min(img_h.saturating_sub(y));
+                    (x, y, w, h)
+                } else if ymax <= 1000.0 && xmax <= 1000.0 {
+                    let x = (((xmin / 1000.0) * img_w as f32).clamp(0.0, img_w as f32)) as u32;
+                    let y = (((ymin / 1000.0) * img_h as f32).clamp(0.0, img_h as f32)) as u32;
+                    let w = ((((xmax - xmin) / 1000.0) * img_w as f32).max(0.0) as u32).min(img_w.saturating_sub(x));
+                    let h = ((((ymax - ymin) / 1000.0) * img_h as f32).max(0.0) as u32).min(img_h.saturating_sub(y));
+                    (x, y, w, h)
+                } else {
+                    let x = (xmin.clamp(0.0, img_w as f32)) as u32;
+                    let y = (ymin.clamp(0.0, img_h as f32)) as u32;
+                    let w = ((xmax - xmin).max(0.0) as u32).min(img_w.saturating_sub(x));
+                    let h = ((ymax - ymin).max(0.0) as u32).min(img_h.saturating_sub(y));
+                    (x, y, w, h)
+                }
+            }
         };
 
         // Filter out tiny slivers or text lines:
@@ -429,7 +522,7 @@ fn detect_figures_with_gemini(
     img_w: u32,
     img_h: u32,
 ) -> Result<Vec<FigureDetection>> {
-    let prompt = figure_detection_prompt(img_w, img_h);
+    let prompt = gemini_figure_detection_prompt(img_w, img_h);
     let raw = crate::backends::gemini::detect_figures(api_key, image_path, &prompt)?;
     parse_detection_json(&raw)
 }
@@ -440,7 +533,7 @@ fn detect_figures_with_gemma(
     img_w: u32,
     img_h: u32,
 ) -> Result<Vec<FigureDetection>> {
-    let prompt = figure_detection_prompt(img_w, img_h);
+    let prompt = gemini_figure_detection_prompt(img_w, img_h);
     let raw = crate::backends::gemma::detect_figures(api_key, image_path, &prompt)?;
     parse_detection_json(&raw)
 }
@@ -857,6 +950,34 @@ mod tests {
 
         let (name3, _) = resolve_unique_figure_path(path, "Figure 1");
         assert_eq!(name3, "Figure-1_2.png");
+    }
+
+    #[test]
+    fn test_gemini_coords_conversion() {
+        let det_json = r#"[
+            {
+                "figure_number": "Figure 2.1",
+                "caption": "File reading Preferences",
+                "box_2d": [131, 187, 411, 874]
+            }
+        ]"#;
+        let detections = parse_detection_json(det_json).unwrap();
+        assert_eq!(detections.len(), 1);
+        let (ymin, xmin, ymax, xmax) = detections[0].box_2d.to_gemini_coords().unwrap();
+        assert_eq!((ymin, xmin, ymax, xmax), (131.0, 187.0, 411.0, 874.0));
+
+        // When scaled to 1035 x 1343:
+        let img_w = 1035.0f32;
+        let img_h = 1343.0f32;
+        let px_x = ((xmin / 1000.0) * img_w) as u32;
+        let px_y = ((ymin / 1000.0) * img_h) as u32;
+        let px_w = (((xmax - xmin) / 1000.0) * img_w) as u32;
+        let px_h = (((ymax - ymin) / 1000.0) * img_h) as u32;
+
+        assert_eq!(px_x, 193);
+        assert_eq!(px_y, 175);
+        assert_eq!(px_w, 711);
+        assert_eq!(px_h, 376);
     }
 
     #[test]
