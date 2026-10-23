@@ -30,6 +30,14 @@ pub fn print_usage() {
     --figure-model <model>   Override vision model for figure classification and Mermaid synthesis
     --max-depth <depth>      Maximum subdirectory levels to search for PDF files (default: 3)
 
+    # Remote sync options (e.g. reverse SSH tunnel from remote VM to local laptop):
+    --sync                   Automatically copy generated .md and <pdfname>_images to remote machine
+    --sync-host <host>       Remote SSH host (default: 127.0.0.1 for reverse tunnel)
+    --sync-port <port>       Remote SSH port (default: 2222)
+    --sync-user <user>       Remote SSH user
+    --sync-dir <dir>         Target directory on remote machine
+    --sync-key <path>        Path to SSH private key file
+
 Supported backends:
     qwen   - Locally deployed Qwen Coder (default, via Ollama/vLLM/OpenAI-compatible endpoint)
     gemini - Google Gemini API (requires GEMINI_API_KEY)
@@ -47,6 +55,12 @@ Environment variables:
     QWEN_API_KEY            Optional API key for local endpoint
     GEMINI_API_KEY          Gemini API key
     GEMMA_API_KEY           Gemma API key
+    PDF2MD_SYNC             Enable automatic SSH sync (1, true, or yes)
+    PDF2MD_SYNC_HOST        Remote SSH host (default: 127.0.0.1)
+    PDF2MD_SYNC_PORT        Remote SSH port (default: 2222)
+    PDF2MD_SYNC_USER        Remote SSH user
+    PDF2MD_SYNC_DIR         Remote landing directory
+    PDF2MD_SYNC_KEY         Path to private SSH key
 "#
     );
 }
@@ -165,6 +179,15 @@ pub fn run() {
             }
             i += 1;
         } else {
+            if let Some((consumed, env_key, env_val)) =
+                crate::sync::parse_sync_arg(arg, raw_args.get(i + 1).map(|s| s.as_str()))
+            {
+                unsafe {
+                    env::set_var(env_key, env_val);
+                }
+                i += consumed;
+                continue;
+            }
             positional_args.push(arg.clone());
             i += 1;
         }

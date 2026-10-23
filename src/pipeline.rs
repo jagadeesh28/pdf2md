@@ -91,6 +91,9 @@ pub fn process_pdf_with_backend(
         input_path.display(),
         output_path.display()
     );
+
+    let sync_config = crate::sync::SyncConfig::from_env();
+    crate::sync::sync_if_enabled(output_path, &image_output_dir, &sync_config);
     Ok(())
 }
 

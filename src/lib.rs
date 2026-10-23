@@ -8,6 +8,7 @@ pub mod markdown;
 pub mod pdf;
 pub mod pipeline;
 pub mod preprocess;
+pub mod sync;
 
 // Backwards-compatible module re-exports
 pub use backends::gemini;
@@ -28,6 +29,7 @@ pub use markdown::{
 pub use pdf::{
     clean_extracted_text, extract_pdf_text, should_use_ocr_fallback, validate_page_range,
 };
+pub use sync::{SyncConfig, sync_if_enabled};
 pub use pipeline::{
     fall_back_to_ocr, fall_back_to_ocr_with_backend, process_ocr_pages,
     process_ocr_pages_with_backend, process_pdf, process_pdf_with_backend, resolve_concurrency,
