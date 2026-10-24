@@ -50,11 +50,11 @@ pub fn render_pages_to_images(
     })?;
     let cache = hayro::RenderCache::new();
     let interpreter_settings = InterpreterSettings::default();
-    let render_settings = hayro::RenderSettings {
+    let render_settings = hayro::RenderSettings::default();
+    let pixmap_settings = hayro::PixmapSettings {
         x_scale: 2.0,
         y_scale: 2.0,
         bg_color: hayro::vello_cpu::color::palette::css::WHITE,
-        ..Default::default()
     };
 
     let total_pages = document.pages().len();
@@ -77,7 +77,7 @@ pub fn render_pages_to_images(
         .take(end_page - begin_page + 1)
     {
         let page_path = output_dir.join(format!("page-{}.png", index + 1));
-        let png = hayro::render(page, &cache, &interpreter_settings, &render_settings)
+        let png = hayro::render(page, &cache, &interpreter_settings, &render_settings, &pixmap_settings)
             .into_png()
             .with_context(|| format!("failed to encode rendered PDF page {}", index + 1))?;
         fs::write(&page_path, png)
